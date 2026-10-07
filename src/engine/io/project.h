@@ -1,0 +1,171 @@
+#pragma once
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace pittore::io {
+
+// IFP — our project file, PSD-style: big-endian header + u32 sections, so
+// readers can skip layers and jump to the preview. One file, no sidecars.
+// Header: INFIPROJ, v1/v2, w/h, RGBA16, colorMode, dpi, background, meta/layer/
+// preview lens. Layers (0 = top): name, kind, flags (visible/locked/isText/
+// textSpec/textExtras/vector/adjustment) [+v2 flags2 + indent], opacity/fill,
+// blend, transform, pixels (deflate RGBA16; 0x0 = metadata-only), then
+// text/extras/vector/adjustment [+v2 mask] blocks. Preview: w/h + pixel
+// block. Samples are straight big-endian 16-bit, like PSD.
+//
+// v2 adds per-layer masks, clipping, nesting depth and the transparency lock.
+// Files that use none of those still encode as v1, so old readers keep
+// working; v1 files decode with the v2 fields defaulted (no mask, unclipped,
+// indent 0, unlocked).
+
+struct ProjectLayerFile {
+    std::string name;
+    std::uint8_t kind = 0;
+    bool visible = true;
+    bool locked = false;
+    std::uint16_t opacity = 100;
+    std::uint16_t fill = 100;
+    std::string blend;                  // blend-mode name
+    double offsetX = 0;
+    double offsetY = 0;
+    double scaleX = 1;
+    double scaleY = 1;
+    std::uint32_t width = 0;            // native pixel width; 0 = metadata-only
+    std::uint32_t height = 0;
+    std::vector<std::uint16_t> rgba;    // width*height*4 straight samples
+
+    // Text: isText = rendered glyphs; hasTextSpec = live editable (fields below).
+    bool isText = false;
+    bool hasTextSpec = false;
+    std::string text;
+    std::string textFamily;
+    bool textBold = false;
+    bool textItalic = false;
+    std::uint8_t textAlign = 0;         // 0 left, 1 centre, 2 right
+    double textSize = 48;
+    double textLineHeight = 1;
+    double textTracking = 0;
+    double textWrapWidth = 0;           // > 0 = frame text
+    double textFrameHeight = 0;
+    double textOriginX = 0;
+    double textOriginY = 0;
+    std::uint32_t textColor = 0xff000000;  // 0xAARRGGBB
+
+    // Char-panel extras (flag-gated so old files still parse).
+    bool hasTextExtras = false;
+    std::uint8_t textUnderline = 0;   // 0 none, 1 single, 2 double
+    std::uint8_t textStrike = 0;
+    std::uint32_t textUnderlineColor = 0;   // 0 = inherit the fill
+    std::uint32_t textStrikeColor = 0;
+    std::uint32_t textBackgroundColor = 0;  // 0 = no highlight
+    double textBaselineShift = 0;
+    double textHScale = 100;
+    double textVScale = 100;
+    std::int8_t textSuperSub = 0;
+    bool textAllCaps = false;
+    bool textKerning = true;
+    std::uint32_t textOtFeatures = 0;
+
+    // Kept vector path/paint (opaque ArtNode bytes, via pittore::vector).
+    bool hasVector = false;
+    std::vector<std::uint8_t> vectorData;
+
+    // Live adjustment (flag-gated). Curve = Curves points, empty otherwise.
+    // `adjustmentCurve` is the RGB composite (master); R/G/B hold the
+    // per-channel Curves points (v2, empty = identity).
+    bool hasAdjustment = false;
+    std::uint8_t adjustmentKind = 0;
+    double adjustmentParams[16] = {};
+    std::vector<std::pair<double, double>> adjustmentCurve;
+    std::vector<std::pair<double, double>> adjustmentCurveR;
+    std::vector<std::pair<double, double>> adjustmentCurveG;
+    std::vector<std::pair<double, double>> adjustmentCurveB;
+
+    // Live Tone Blend Group (flag-gated, bit 7): strength, color, contrast,
+    // lowPass, contentType (as double). Groups predate tone blend, so old
+    // files simply read hasToneBlend = false. (The research brief reserved
+    // bit 5, but bits 5–6 went to vector/adjustment first.)
+    bool hasToneBlend = false;
+    double toneBlend[5] = {1, 1, 0, 1, 0};
+
+    // v2: flags2 bit 0 = hasMask, bit 1 = clipped, bit 2 = lockTransparency;
+    // indent is the group nesting depth (0 = top level). The mask is a
+    // single-channel coverage grid (65535 = reveal) in layer-native pixels,
+    // mapped to the document by (offset, scale) like the live model.
+    bool lockTransparency = false;
+    bool clipped = false;
+    std::int32_t indent = 0;
+    bool hasMask = false;
+    bool maskEnabled = true;
+    double maskOffsetX = 0;
+    double maskOffsetY = 0;
+    double maskScaleX = 1;
+    double maskScaleY = 1;
+    double maskDensity = 1;
+    double maskFeather = 0;
+    std::uint32_t maskWidth = 0;
+    std::uint32_t maskHeight = 0;
+    std::vector<std::uint16_t> mask;
+
+    // Live filter (v2, flags2 bit 3): recipe id + params + enabled. The
+    // native pixels persist untouched alongside; the render re-derives.
+    bool hasLiveFilter = false;
+    bool liveFilterEnabled = true;
+    std::string liveFilterId;
+    std::vector<double> liveFilterParams;
+
+    // Foreign PSD blocks (v4): verbatim TySh/SoLd/..., carried only for
+    // layers that are untouched (guarded upstairs, not here). Any layer
+    // with blocks forces version 4; older readers reject v4 files.
+    struct PsdBlock {
+        char sig[4] = {'8', 'B', 'I', 'M'};
+        char key[4] = {};
+        std::vector<std::uint8_t> data;
+        std::vector<std::uint8_t> padding;
+    };
+    std::vector<PsdBlock> psdBlocks;
+};
+
+struct ProjectFileDoc {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint16_t dpi = 300;
+    std::uint16_t colorMode = 3;        // 1 grayscale, 3 RGB
+    std::string name;
+    std::string colorModeName;          // e.g. "RGB/8"
+    std::string background;             // white | black | transparent
+    // CMYK destination profile bytes (tag "CMYK/…"); empty otherwise.
+    // Trailing u32-length block in the meta section: old readers skip to
+    // metaLen and new readers tolerate its absence, so no version bump.
+    std::vector<std::uint8_t> icc;
+    std::vector<ProjectLayerFile> layers;  // index 0 = top
+    std::uint32_t previewWidth = 0;
+    std::uint32_t previewHeight = 0;
+    std::vector<std::uint16_t> preview; // previewW*previewH*4 straight samples
+};
+
+// Writes IFP. Nullopt on bad dims or pixel mismatch.
+std::optional<std::vector<std::uint8_t>> projectEncode(const ProjectFileDoc& project,
+                                                       std::string* error = nullptr);
+
+// Reads IFP. Bounds-checked; nullopt with reason on corrupt data.
+std::optional<ProjectFileDoc> projectDecode(const std::vector<std::uint8_t>& bytes,
+                                            std::string* error = nullptr);
+
+// Header + preview only, no layer pixels. For start-page thumbnails.
+struct ProjectScanInfo {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::string name;
+    std::string colorModeName;
+    std::string background;
+    std::uint32_t previewWidth = 0;
+    std::uint32_t previewHeight = 0;
+    std::vector<std::uint16_t> preview;
+};
+std::optional<ProjectScanInfo> projectScan(const std::vector<std::uint8_t>& bytes,
+                                           std::string* error = nullptr);
+
+}  // namespace pittore::io

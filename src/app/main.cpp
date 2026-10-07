@@ -1,0 +1,62 @@
+#include <QApplication>
+#include <QStyleFactory>
+
+#include <cstring>
+
+#include "engine/core/log.h"
+#include "ui/ai_models.h"
+#include "ui/app_state.h"
+#include "ui/logging.h"
+#include "ui/main_window.h"
+#include "ui/theme.h"
+
+namespace {
+
+bool hasFlag(int argc, char** argv, const char* flag) {
+    for (int i = 1; i < argc; ++i)
+        if (std::strcmp(argv[i], flag) == 0) return true;
+    return false;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    // CLI helpers for `just models`. Kept here so this file stays free of
+    // Qt's protected symbols (the app links non-PIE via nvcc).
+    if (hasFlag(argc, argv, "--list-models"))
+        return pittore::ui::ai_model_cli(argc, argv, /*list=*/true);
+    if (hasFlag(argc, argv, "--fetch-models"))
+        return pittore::ui::ai_model_cli(argc, argv, /*list=*/false);
+    if (hasFlag(argc, argv, "--fetch-model"))
+        return pittore::ui::ai_model_cli(argc, argv, /*list=*/false);
+
+    QApplication app(argc, argv);
+    // Fractional display scaling (125/150%) rounds to full pixels by
+    // default, blurring the whole UX one notch down. PassThrough keeps
+    // the real scale factor on every screen (Qt6; no-op elsewhere).
+    QGuiApplication::setHighDpiScaleFactorRoundingPolicy(
+        Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
+    QCoreApplication::setApplicationName(QStringLiteral("painter"));
+    QCoreApplication::setOrganizationName(QStringLiteral("PittoreStudio"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+
+    // Fusion lets our theme own every colour; native styles hard-code theirs.
+    QApplication::setStyle(QStyleFactory::create(QStringLiteral("Fusion")));
+
+    // Set up logging first so early startup still gets logged. Always on
+    // (alpha); PITTORE_DEBUG=0 silences verbose lines.
+    pittore::ui::install_logging();
+    ::pittore::core::log::log_info(
+        "[app] Pittore Studio 0.1.0 starting | log dir: %s",
+        ::pittore::core::log::log_dir().c_str());
+
+    pittore::ui::AppState state;
+    QApplication::setPalette(pittore::ui::paletteFor(state.theme()));
+    app.setStyleSheet(pittore::ui::styleSheetFor(state.theme()));
+
+    pittore::ui::MainWindow window(&state);
+    window.resize(1680, 1000);
+    window.show();
+
+    return QApplication::exec();
+}

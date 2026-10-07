@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>studio.pittore.painter</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Pittore Studio</name>
+  <summary>Layer-based photo editor for Linux</summary>
+  <description>
+    <p>
+      Pittore Studio is a layer-based photo editor for Linux, with raster
+      painting and retouching, vector shapes and paths, type, adjustment
+      layers, filters, and an ICC-aware colour pipeline.
+    </p>
+  </description>
+  <launchable type="desktop-id">studio.pittore.painter.desktop</launchable>
+  <provides>
+    <binary>painter</binary>
+    <mediatype>application/x-painter-project</mediatype>
+  </provides>
+  <categories>
+    <category>Graphics</category>
+    <category>Photography</category>
+    <category>RasterGraphics</category>
+  </categories>
+</component>

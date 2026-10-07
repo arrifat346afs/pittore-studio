@@ -1,0 +1,33 @@
+# build directories (meson + ninja)
+/build/
+/builddir/
+/_build/
+
+# meson subproject package cache (downloaded wraps)
+/subprojects/packagecache/
+/subprojects/*/subprojects/
+
+# compiler / tooling artifacts
+compile_commands.json
+.cache/
+.vscode/
+.idea/
+*~
+*.orig
+*.rej
+*.bak
+
+# test output
+/coverage/
+
+# vendored reference projects (not part of this repo)
+/Reference/
+
+# large test fixtures, fetched separately
+/tests/SVG/
+
+# tool output
+*.o
+*.a
+*.so
+*.log

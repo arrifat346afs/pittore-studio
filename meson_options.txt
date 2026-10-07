@@ -1,0 +1,20 @@
+option('backend-cuda', type : 'feature', value : 'auto',
+  description : 'Build the CUDA (NVIDIA) compute backend; auto = on when nvcc is found')
+
+option('backend-hip', type : 'feature', value : 'auto',
+  description : 'Build the HIP (AMD) compute backend; auto = on when hipcc is found')
+
+option('cuda-root', type : 'string', value : '',
+  description : 'Path to the CUDA toolkit root (empty = derived from nvcc location)')
+
+option('hip-root', type : 'string', value : '',
+  description : 'Path to the ROCm root (empty = derived from hipcc location)')
+
+option('onnxruntime', type : 'feature', value : 'auto',
+  description : 'ONNX Runtime AI backend for background removal; auto = on when a runtime is found')
+
+option('onnxruntime-root', type : 'string', value : '',
+  description : 'Prefix of an ONNX Runtime install (include/ + lib/); empty = auto-detect (pkg-config, then /usr)')
+
+option('app', type : 'feature', value : 'auto',
+  description : 'Build the Qt6 application shell; auto = on when Qt6 Widgets are found')

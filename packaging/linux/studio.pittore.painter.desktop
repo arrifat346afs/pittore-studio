@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Pittore Studio
+GenericName=Photo Editor
+Comment=Layer-based photo editor for Linux
+Exec=painter %F
+Icon=painter
+Terminal=false
+Categories=Graphics;Photography;RasterGraphics;
+MimeType=application/x-painter-project;
+StartupWMClass=painter

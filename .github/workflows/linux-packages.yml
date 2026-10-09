@@ -71,7 +71,7 @@ jobs:
           j=$(awk '/MemAvailable/{print int($2/3072000)}' /proc/meminfo)
           [ "${j:-0}" -lt 1 ] && j=1
           [ "$j" -gt "$n" ] && j=$n
-          ninja -C build -j"$j" src/app/painter
+          ninja -C build -j"$j" src/app/painter src/app/pittore-mcp
           rm -rf staging dist
           mkdir -p staging dist
           DESTDIR="$PWD/staging" meson install -C build --no-rebuild
@@ -206,7 +206,7 @@ jobs:
           j=$(awk '/MemAvailable/{print int($2/3072000)}' /proc/meminfo)
           [ "${j:-0}" -lt 1 ] && j=1
           [ "$j" -gt "$n" ] && j=$n
-          ninja -C build -j"$j" src/app/painter
+          ninja -C build -j"$j" src/app/painter src/app/pittore-mcp
           rm -rf staging dist
           mkdir -p staging dist
           DESTDIR="$PWD/staging" meson install -C build --no-rebuild
@@ -247,7 +247,7 @@ jobs:
           j=$(awk '/MemAvailable/{print int($2/3072000)}' /proc/meminfo)
           [ "${j:-0}" -lt 1 ] && j=1
           [ "$j" -gt "$n" ] && j=$n
-          ninja -C build -j"$j" src/app/painter
+          ninja -C build -j"$j" src/app/painter src/app/pittore-mcp
           rm -rf AppDir dist
           mkdir -p AppDir dist
           DESTDIR="$PWD/AppDir" meson install -C build --no-rebuild --prefix=/usr

@@ -15,7 +15,7 @@ sha256sums=('SKIP')
 build() {
   meson setup build "$srcdir/$pkgname-$pkgver" --prefix=/usr -Dbuildtype=release \
     -Dbackend-cuda=disabled -Dbackend-hip=disabled -Donnxruntime=disabled -Dapp=enabled
-  ninja -C build
+  ninja -C build src/app/painter src/app/pittore-mcp
 }
 
 package() {

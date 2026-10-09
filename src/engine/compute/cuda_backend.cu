@@ -1248,13 +1248,13 @@ class CudaBuffer final : public Buffer {
     void upload() const override {
         const auto t0 = std::chrono::steady_clock::now();
         check(cudaMemcpy(dev_, host_, size_, cudaMemcpyHostToDevice), "cudaMemcpy H2D");
-        PITTORE_LOG("[gpu][upload] bytes=%zu ms=%.3f", size_,
+        if (::pittore::core::log::transferTrace()) PITTORE_LOG("[gpu][upload] bytes=%zu ms=%.3f", size_,
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
     void download() const override {
         const auto t0 = std::chrono::steady_clock::now();
         check(cudaMemcpy(host_, dev_, size_, cudaMemcpyDeviceToHost), "cudaMemcpy D2H");
-        PITTORE_LOG("[gpu][download] bytes=%zu ms=%.3f", size_,
+        if (::pittore::core::log::transferTrace()) PITTORE_LOG("[gpu][download] bytes=%zu ms=%.3f", size_,
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
 
@@ -1272,7 +1272,7 @@ class CudaBuffer final : public Buffer {
                            static_cast<const char*>(host_) + y0 * pitch + x0 * sizeof(float4),
                            pitch, wb, y1 - y0, cudaMemcpyHostToDevice),
               "cudaMemcpy2D H2D region");
-        PITTORE_LOG("[gpu][upload] region=(%u,%u,%u,%u) bytes=%zu ms=%.3f", x0, y0,
+        if (::pittore::core::log::transferTrace()) PITTORE_LOG("[gpu][upload] region=(%u,%u,%u,%u) bytes=%zu ms=%.3f", x0, y0,
                      x1, y1, wb * (y1 - y0),
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
@@ -1287,7 +1287,7 @@ class CudaBuffer final : public Buffer {
                            static_cast<const char*>(dev_) + y0 * pitch + x0 * sizeof(float4),
                            pitch, wb, y1 - y0, cudaMemcpyDeviceToHost),
               "cudaMemcpy2D D2H region");
-        PITTORE_LOG("[gpu][download] region=(%u,%u,%u,%u) bytes=%zu ms=%.3f", x0, y0,
+        if (::pittore::core::log::transferTrace()) PITTORE_LOG("[gpu][download] region=(%u,%u,%u,%u) bytes=%zu ms=%.3f", x0, y0,
                      x1, y1, wb * (y1 - y0),
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }

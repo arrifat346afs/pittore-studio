@@ -52,7 +52,6 @@ bool inflateBounded(const std::uint8_t* src, std::size_t n,
     buf.resize(n * 4 + 4096);
     std::size_t produced = 0;
     bool done = false;
-    bool ok = false;
     for (;;) {
         if (produced == buf.size()) {
             if (buf.size() >= kMaxProfile) break;
@@ -63,7 +62,6 @@ bool inflateBounded(const std::uint8_t* src, std::size_t n,
         const int rc = inflate(&zs, Z_NO_FLUSH);
         produced = buf.size() - zs.avail_out;
         if (rc == Z_STREAM_END) {
-            ok = true;
             done = true;
             break;
         }

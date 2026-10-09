@@ -50,6 +50,14 @@ int fallCol(const QImage& m, int y) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Hermetic: Enhance Edges must exercise the classical fallback here, not
+    // the developer's multi-GB model cache (a 1.1 GB HR model at 2048 input
+    // OOMs the desktop when tests run in parallel).
+    const QString noModels =
+        QDir::tempPath() + QStringLiteral("/pittore-test-no-models-refine");
+    QDir(noModels).removeRecursively();
+    QDir().mkpath(noModels);
+    qputenv("PITTORE_MODELS_DIR", noModels.toLocal8Bit());
     QApplication app(argc, argv);
     const QString logDir =
         QDir::tempPath() + QStringLiteral("/pittore-refine-log");

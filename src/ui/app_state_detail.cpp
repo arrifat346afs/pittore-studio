@@ -959,4 +959,39 @@ QVector<int> layerMoveUnit(const DocumentItem* d, int* base) {
     return sorted;
 }
 
+void normalizeLayerIndents(QVector<LayerItem>& layers) {
+    for (int i = 0; i < layers.size(); ++i) {
+        int d = layers[i].indent;
+        if (d < 0) d = 0;
+        if (i == 0) {
+            // Nothing precedes the first row, so it cannot hang under a group.
+            layers[i].indent = 0;
+            continue;
+        }
+        // No step deeper than one past the predecessor.
+        const int prev = layers[i - 1].indent;
+        if (d > prev + 1) d = prev + 1;
+        // A row deeper than its nearest shallower predecessor must hang
+        // under a group: pixels cannot parent children. Step back up to a
+        // sibling of the pixel that would otherwise shield the row from its
+        // group (the scan-back in enclosingGroups stops at such rows).
+        while (d > 0) {
+            int parent = -1;
+            for (int j = i - 1; j >= 0; --j) {
+                if (layers[j].indent < d) {
+                    parent = j;
+                    break;
+                }
+            }
+            if (parent < 0) {
+                d = 0;
+                break;
+            }
+            if (layers[parent].kind == LayerItem::Kind::Group) break;
+            d = layers[parent].indent;
+        }
+        layers[i].indent = d;
+    }
+}
+
 }  // namespace pittore::ui

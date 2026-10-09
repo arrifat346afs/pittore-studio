@@ -17,6 +17,13 @@ if host_machine.system() != 'linux'
   error('Pittore Studio is Linux-only. Refusing to build elsewhere.')
 endif
 
+# GCC 16 probes incomplete Qt types in SFINAE contexts and notes it on every
+# TU including Qt headers. Third-party header noise, not project code.
+cxx = meson.get_compiler('cpp')
+if cxx.has_argument('-Wno-sfinae-incomplete')
+  add_project_arguments('-Wno-sfinae-incomplete', language : 'cpp')
+endif
+
 subdir('src')
 subdir('tests')
 subdir('tools')

@@ -237,12 +237,17 @@ class CanvasView final : public QAbstractScrollArea {
     // (checkerboard + composite source-rect), so a layer-eye toggle paints
     // the 60×60 window instead of the whole document.
     void paintDocument(QPainter& painter, const QRect& viewDirty);
-    // Segmented paint: pixel runs composite solo (in order) while simple
-    // vector layers draw straight from geometry at view resolution. True when
-    // it painted; false means no layer qualified and the caller keeps the
-    // single flattened blit.
+    // Segmented paint: one edit-time composite blit plus crisp live draws
+    // for simple vector layers with nothing stacked above them (fully
+    // opaque, no overlapping pixel content above). Everything else keeps
+    // its correctly blended composite raster. True when it painted; false
+    // when no layer qualifies and the caller keeps the single flattened
+    // blit. baseDrawn: the composite base is already on screen (the tiled
+    // path put it there with its ready tiles), so re-blitting it here would
+    // bury those tiles and undo the sharpening frame.
     bool paintSegmented(QPainter& painter, const QTransform& docToView,
-                        const QRectF& docRect, const QRect& viewDirty);
+                        const QRectF& docRect, const QRect& viewDirty,
+                        bool baseDrawn = false);
     void paintOverlay(QPainter& painter);
     // Brush cursor + resize HUD: the tool's own pointer UI, painted on
     // every frame (hiding the cursor would blind the brush) while the
@@ -535,12 +540,12 @@ class CanvasView final : public QAbstractScrollArea {
     QTimer* hoverSettleTimer_ = nullptr;
     void onHoverSettle();
 
-    // Zoom settle: wheel/pinch/scrub zoom re-bakes vector art at ceil(zoom)²
-    // density plus a full composite + multi-hundred-MB re-upload per density
-    // step (see bakeArtDense). Doing that synchronously in setZoom turned
-    // every wheel tick into 25–65ms of gather+placed work. The timer
-    // coalesces a burst into one rebake on settle; the frames themselves are
-    // blits / direct geometry draws, so zooming stays smooth and still lands
+    // Zoom settle: wheel/pinch/scrub zoom re-bakes vector art at ceil(zoom)
+    // density plus a full composite + re-upload per density step (see
+    // bakeArtDense). Doing that synchronously in setZoom turned every wheel
+    // tick into 25–65ms of gather+placed work. The timer coalesces the burst
+    // into one rebake on settle; the frames themselves are one composite
+    // blit plus direct geometry draws, so zooming stays smooth and lands
     // crisp.
     QTimer* zoomSettleTimer_ = nullptr;
 

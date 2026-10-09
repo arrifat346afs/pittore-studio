@@ -28,7 +28,25 @@ class CanvasView;
 constexpr int kRulerSize = 18;
 
 QCursor brushHiddenCursor();
-const QVector<double>& zoomSteps();
+// The standard zoom ladder. Clicks with the Zoom tool and Ctrl+/Ctrl- step
+// through these while inside the range, then continue geometrically (x2)
+// past the ends; wheel/pinch multiply freely. Inline: a static local costs
+// nothing per call and keeps this table reachable from translation units
+// that link only a subset of the UI sources (e.g. headless tests).
+inline const QVector<double>& zoomSteps() {
+    static const QVector<double> steps = {
+        0.000833, 0.00125, 0.0025, 0.005, 0.0067, 0.01, 0.0125, 0.01667, 0.025, 0.03333,
+        0.05, 0.0667, 0.0833, 0.125, 0.1667, 0.25, 0.3333, 0.50, 0.6667, 1.0,
+        1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 11.0, 16.0, 22.0, 32.0};
+    return steps;
+}
+// Infinite-zoom rails: the ladder above covers everyday work; wheel, pinch
+// and keys continue geometrically past its ends until these sanity rails.
+// Twelve orders of magnitude each way keeps every downstream double (view
+// coords stay below 2^53 for any real document) and guarded int conversion
+// exact. setZoom rejects anything non-positive or non-finite outright.
+constexpr double kMinZoom = 1e-9;
+constexpr double kMaxZoom = 1e9;
 bool isSelectionTool(ToolId id);
 bool isPaintTool(ToolId id);
 bool isTypeTool(ToolId id);

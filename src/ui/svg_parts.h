@@ -159,7 +159,9 @@ struct SvgImportDiag {
     int maskDefs = 0, filterDefs = 0, meshDefs = 0;
     int gradUses = 0, patternUses = 0, clipUses = 0, maskUses = 0;
     int filterUses = 0, markerUses = 0, meshUses = 0;
-    int skippedLeaves = 0;  // unsupported tags + empty non-text geometry
+    int skippedLeaves = 0;  // unsupported tags + undecodable images
+    int emptyLeaves = 0;  // empty geometry (d="" etc): paints nothing, kept
+                          // out of the degraded verdict but still reported
     // tag -> dropped count (unsupported elements only, first 16 tags).
     QHash<QString, int> skipTags;
     // "kind#id" -> count for refs that resolve to nothing (first 16).
@@ -210,6 +212,11 @@ struct SvgImportResult {
 // Returns false on a hard failure; *dpiOut defaults to 96.
 bool svgPartsImport(const QByteArray& xml, SvgImportResult* out, int* dpiOut,
                     QString* error);
+
+// Whether a wxh canvas fits the flatten fallback's single raster under the
+// given pixel budget: degenerate and over-wide (>16384) canvases never do.
+// Pure predicate so the gate is unit-testable without allocating the image.
+bool svgFlattenSizeOk(int iw, int ih, qint64 pixelBudget);
 
 // SVG path-data → Qt path (shared by the walker, textPath rebuilds and the
 // XML editor's d= writer). File-local parsers stay hidden; these wrappers

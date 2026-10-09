@@ -1217,8 +1217,7 @@ void benchEngine() {
     // polygon Shape layer. CPU only by design.
     {
         AppState state;
-        DocumentItem* doc =
-            state.addDocument(QStringLiteral("tracebench"), QSize(1920, 1080), 72);
+        state.addDocument(QStringLiteral("tracebench"), QSize(1920, 1080), 72);
         state.setSelection(QRectF(QPointF(900, 480), QPointF(1020, 600)),
                           false);
         Stats st = timeIters(

@@ -57,8 +57,9 @@ int main(int argc, char** argv) {
     sendMouse(vp, QEvent::MouseButtonPress, tp, Qt::LeftButton, Qt::LeftButton);
     sendMouse(vp, QEvent::MouseButtonRelease, tp, Qt::LeftButton, Qt::NoButton);
     app.processEvents();
-    std::printf("after type click: editing=%d layers=%d\n",
-                canvas->textEditing() ? 1 : 0, d->layers.size());
+    std::printf("after type click: editing=%d layers=%lld\n",
+                canvas->textEditing() ? 1 : 0,
+                static_cast<long long>(d->layers.size()));
     QWidget* focus = QApplication::focusWidget();
     sendKey(focus ? focus : vp, QEvent::KeyPress, Qt::Key_H, QStringLiteral("H"));
     sendKey(focus ? focus : vp, QEvent::KeyPress, Qt::Key_I, QStringLiteral("i"));
@@ -68,8 +69,9 @@ int main(int argc, char** argv) {
                 d->layers[d->activeLayer].pixels ? 1 : 0);
     sendKey(focus ? focus : vp, QEvent::KeyPress, Qt::Key_Escape, QString());
     app.processEvents();
-    std::printf("after escape: editing=%d layers=%d\n",
-                canvas->textEditing() ? 1 : 0, d->layers.size());
+    std::printf("after escape: editing=%d layers=%lld\n",
+                canvas->textEditing() ? 1 : 0,
+                static_cast<long long>(d->layers.size()));
 
     // Move tool + the real double-click sequence on the text.
     state.setActiveTool(ToolId::Move);

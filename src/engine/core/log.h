@@ -257,6 +257,18 @@ inline bool strokeTrace() {
     return on;
 }
 
+// Transfer-trace gate: per-upload logging (format + mutex + file write per
+// call) costs more than small transfers and floods the log on huge
+// documents (hundreds of thousands of lines). Off unless
+// PITTORE_TRANSFER_TRACE=1.
+inline bool transferTrace() {
+    static const bool on = [] {
+        const char* e = pittoreEnv("PITTORE_TRANSFER_TRACE", "INFINITY_TRANSFER_TRACE");
+        return e != nullptr && e[0] != '\0' && e[0] != '0';
+    }();
+    return on;
+}
+
 // Slow-event threshold (ms): region/rebuild logs are trace-gated above, but
 // any event at or over this always reports with its stage breakdown, so real
 // slowness in a session is attributable without log spam. Override with

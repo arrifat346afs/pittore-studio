@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "pittore-studio": {
+        "type": "local",
+        "command": ["pittore-mcp"],
+        "environment": {
+          "PATH": "{env:PATH}:/usr/sbin:/usr/local/bin"
+        }
+      }
+    }
+  }
+}

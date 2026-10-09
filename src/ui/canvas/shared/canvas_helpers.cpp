@@ -35,15 +35,8 @@ QCursor brushHiddenCursor() {
     return QCursor(Qt::BlankCursor);
 }
 
-// The standard zoom ladder. Clicks with the Zoom tool and Ctrl+/Ctrl- step
-// through these rather than multiplying by a constant factor.
-const QVector<double>& zoomSteps() {
-    static const QVector<double> steps = {
-        0.000833, 0.00125, 0.0025, 0.005, 0.0067, 0.01, 0.0125, 0.01667, 0.025, 0.03333,
-        0.05, 0.0667, 0.0833, 0.125, 0.1667, 0.25, 0.3333, 0.50, 0.6667, 1.0,
-        1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 11.0, 16.0, 22.0, 32.0};
-    return steps;
-}
+// The standard zoom ladder lives in canvas_helpers.h (zoomSteps): inline so
+// link units that pull in only a subset of the UI sources still reach it.
 
 bool isSelectionTool(ToolId id) {
     switch (id) {

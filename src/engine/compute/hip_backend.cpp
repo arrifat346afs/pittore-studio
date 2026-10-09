@@ -1235,13 +1235,13 @@ class HipBuffer final : public Buffer {
     void upload() const override {
         const auto t0 = std::chrono::steady_clock::now();
         check(hipMemcpy(dev_, host_, size_, hipMemcpyHostToDevice), "hipMemcpy H2D");
-        PITTORE_LOG("[gpu][upload] bytes=%zu ms=%.3f", size_,
+        if (::pittore::core::log::transferTrace()) PITTORE_LOG("[gpu][upload] bytes=%zu ms=%.3f", size_,
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
     void download() const override {
         const auto t0 = std::chrono::steady_clock::now();
         check(hipMemcpy(host_, dev_, size_, hipMemcpyDeviceToHost), "hipMemcpy D2H");
-        PITTORE_LOG("[gpu][download] bytes=%zu ms=%.3f", size_,
+        if (::pittore::core::log::transferTrace()) PITTORE_LOG("[gpu][download] bytes=%zu ms=%.3f", size_,
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
 
@@ -1259,7 +1259,7 @@ class HipBuffer final : public Buffer {
                           static_cast<const char*>(host_) + y0 * pitch + x0 * sizeof(float4),
                           pitch, wb, y1 - y0, hipMemcpyHostToDevice),
               "hipMemcpy2D H2D region");
-        PITTORE_LOG("[gpu][upload] region=(%u,%u,%u,%u) bytes=%zu ms=%.3f", x0, y0,
+        if (::pittore::core::log::transferTrace()) PITTORE_LOG("[gpu][upload] region=(%u,%u,%u,%u) bytes=%zu ms=%.3f", x0, y0,
                      x1, y1, wb * (y1 - y0),
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
@@ -1274,7 +1274,7 @@ class HipBuffer final : public Buffer {
                           static_cast<const char*>(dev_) + y0 * pitch + x0 * sizeof(float4),
                           pitch, wb, y1 - y0, hipMemcpyDeviceToHost),
               "hipMemcpy2D D2H region");
-        PITTORE_LOG("[gpu][download] region=(%u,%u,%u,%u) bytes=%zu ms=%.3f", x0, y0,
+        if (::pittore::core::log::transferTrace()) PITTORE_LOG("[gpu][download] region=(%u,%u,%u,%u) bytes=%zu ms=%.3f", x0, y0,
                      x1, y1, wb * (y1 - y0),
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }

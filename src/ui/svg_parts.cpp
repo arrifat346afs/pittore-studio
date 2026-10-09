@@ -59,11 +59,13 @@ qint64 svgGeometryBudget() {
     return 512ll * 1024 * 1024;
 }
 
-// Post-merge guards: thousands of rows composite and panel fine, so these
-// only catch pathological files. Rows bound composite/panel work; raster
-// area bounds memory, so its cap is derived from the machine-scaled
+// Post-merge guards: rows are emitted one per shape and group (no run
+// merging - see svgPartsImport), so a real map legitimately arrives with
+// tens of thousands of rows; the cap sits an order of magnitude above that
+// and only catches pathological files. Rows bound composite/panel work;
+// raster area bounds memory, so its cap is derived from the machine-scaled
 // geometry budget (pixels = budget bytes / 4 for RGBA8) with a 64MP floor.
-constexpr int kMaxImportRows = 32768;
+constexpr int kMaxImportRows = 262144;
 
 qint64 svgRasterAreaBudget() {
     return std::max<qint64>(64ll * 1024 * 1024, svgGeometryBudget() / 4);
@@ -1842,6 +1844,11 @@ void walkElement(QXmlStreamReader& xml, const QTransform& parentTf,
             if (budget && budget->diag) {
                 ++budget->diag->skippedLeaves;
                 noteCapped(budget->diag->skipTags, tag);
+                // TEMP-DIAG (revert before commit): identify skipped leaves.
+                std::fprintf(stderr, "[skip] tag=%s id=%s d=%.80s\n",
+                             tag.toUtf8().constData(),
+                             a.value(QLatin1String("id")).toString().toUtf8().constData(),
+                             get(QLatin1String("d")).toUtf8().constData());
             }
             xml.skipCurrentElement();
             return;
@@ -1858,10 +1865,12 @@ void walkElement(QXmlStreamReader& xml, const QTransform& parentTf,
     const bool isTextLeaf = (tag == QLatin1String("text"));
     if (path.isEmpty()) {
         // Blank text (whitespace runs) is benign; empty geometry otherwise
-        // means a shape that drew nothing.
+        // means a shape that drew nothing (empty d=, zero-area rect, ...).
+        // Counted apart from skippedLeaves: nothing is lost, so it must not
+        // flip the verdict to degraded.
         if (budget && budget->diag) {
             if (isTextLeaf) ++budget->diag->blankTexts;
-            else ++budget->diag->skippedLeaves;
+            else ++budget->diag->emptyLeaves;
         }
         return;
     }
@@ -2639,77 +2648,6 @@ void paintSharedLeaves(QPainter& p, const SvgNode& n, const SvgResources& res,
     }
 }
 
-// Collapse maximal flattenable runs into shared-raster rows: a map file's
-// hundreds of per-municipality leaves become a handful of tight region
-// rasters. Runs break at text leaves (labels stay vector-crisp), groups
-// (structure preserved) and non-flattenable leaves, and split when the
-// union would exceed 16x the members' bbox area (same spatial-tightness
-// rule as the merge pass: adjacent shapes share a raster, far-flung ones
-// don't, so trimmed images and composite cells stay sparse).
-void flattenLeafRuns(QVector<SvgNode>& out) {
-    for (SvgNode& n : out) {
-        if (n.group && !n.flattened) flattenLeafRuns(n.children);
-    }
-    constexpr int kMinFlattenRun = 8;
-    constexpr double kMaxUnionGrowth = 16.0;
-    if (out.size() < (qsizetype)kMinFlattenRun) return;
-    QVector<SvgNode> res;
-    res.reserve(out.size());
-    qsizetype i = 0;
-    const qsizetype n = out.size();
-    while (i < n) {
-        if (out[i].group || !flattenableLeaf(out[i])) {
-            res.push_back(std::move(out[i]));
-            ++i;
-            continue;
-        }
-        qsizetype j = i + 1;
-        while (j < n && !out[j].group && flattenableLeaf(out[j])) ++j;
-        qsizetype k = i;
-        while (k < j) {
-            QRectF box;
-            bool hasBox = false;
-            double memberArea = 0.0;
-            qsizetype m = k;
-            while (m < j) {
-                const QRectF b = out[m].transform.mapRect(
-                    out[m].path.boundingRect());
-                const double a = b.width() * b.height();
-                if (hasBox) {
-                    const QRectF u = box.united(b);
-                    const double denom =
-                        memberArea > 0.0 ? memberArea : 1.0;
-                    if (u.width() * u.height() > kMaxUnionGrowth * denom) break;
-                } else {
-                    box = b;
-                    hasBox = true;
-                }
-                memberArea += a;
-                ++m;
-            }
-            if (m == k) ++m;  // degenerate bbox: keep the leaf whole
-            if (m - k >= kMinFlattenRun) {
-                SvgNode f;
-                f.group = true;
-                f.flattened = true;
-                f.name = out[k].name +
-                         QStringLiteral(" +%1").arg(m - k - 1);
-                f.opacity = 1.0;
-                f.children.reserve(m - k);
-                for (qsizetype t = k; t < m; ++t)
-                    f.children.push_back(std::move(out[t]));
-                res.push_back(std::move(f));
-            } else {
-                for (qsizetype t = k; t < m; ++t)
-                    res.push_back(std::move(out[t]));
-            }
-            k = m;
-        }
-        i = j;
-    }
-    out = std::move(res);
-}
-
 // Rescue pass, only when the row census already tripped a guard: seal
 // every group into one shared row (exact paint, retained source for zoom
 // rebakes). Sole wrappers are descended into instead of sealed, so a
@@ -3260,6 +3198,11 @@ bool svgPartsParse(const QByteArray& xml, SvgSceneRoot* out, QString* error) {
     return svgPartsParseBudgeted(xml, out, error, &budget, &overflow, nullptr, true);
 }
 
+bool svgFlattenSizeOk(int iw, int ih, qint64 pixelBudget) {
+    if (iw <= 0 || ih <= 0 || iw > 16384 || ih > 16384) return false;
+    return static_cast<qint64>(iw) * ih <= pixelBudget;
+}
+
 namespace {
 
 // Flattened fallback: single raster layer for SVGs with more leaves than the
@@ -3269,13 +3212,11 @@ namespace {
 bool svgFlattenImport(const QByteArray& in, SvgResources& res, int iw, int ih,
                       const QTransform& root, SvgImportResult* out, int* dpiOut,
                       QString* error) {
-    if (iw <= 0 || ih <= 0 || iw > 16384 || ih > 16384) {
-        if (error) *error = QStringLiteral("SVG has an unsupported canvas size");
-        return false;
-    }
-    const qint64 npix = static_cast<qint64>(iw) * ih;
-    if (npix > 64000000) {
-        if (error) *error = QStringLiteral("SVG canvas is too large to rasterize");
+    if (!svgFlattenSizeOk(iw, ih, svgRasterAreaBudget())) {
+        if (error)
+            *error = (iw <= 0 || ih <= 0 || iw > 16384 || ih > 16384)
+                         ? QStringLiteral("SVG has an unsupported canvas size")
+                         : QStringLiteral("SVG canvas is too large to rasterize");
         return false;
     }
     QImage doc(iw, ih, QImage::Format_ARGB32_Premultiplied);
@@ -3434,6 +3375,10 @@ void logSvgImportReport(const SvgImportDiag& d) {
         ::pittore::core::log::log_warning(
             "[import] SVG skipped unsupported elements: %s",
             mapText(d.skipTags).toUtf8().constData());
+    if (d.emptyLeaves > 0)
+        ::pittore::core::log::log_info(
+            "[import] SVG dropped %d empty-geometry leaves (paints nothing)",
+            d.emptyLeaves);
     if (!d.missingRefs.isEmpty())
         ::pittore::core::log::log_warning(
             "[import] SVG dangling refs (inherited paint kept): %s",
@@ -3594,10 +3539,11 @@ bool svgPartsImport(const QByteArray& xml, SvgImportResult* out, int* dpiOut,
     }
     applyRoot(scene.children, root);
 
-    // Collapse long flattenable runs into shared-raster rows (doc-space
-    // transforms are final now). Map files drop from thousands of rows to
-    // tens with identical pixels; small docs are untouched.
-    flattenLeafRuns(scene.children);
+    // Deliberately no run merging here: every authored group stays a group
+    // row and every shape its own layer (flattening sibling runs into one
+    // shared image row hid structure the panel must show). The row/area
+    // census below still guards pathological files via the seal/chunk
+    // rescue.
     {
         // Cost census before allocating a single raster: pathological files
         // fall back while still cheap.

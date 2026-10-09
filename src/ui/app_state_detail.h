@@ -19,6 +19,8 @@ bool layerSelectionMask(const DocumentItem& d, const LayerItem& l,
                         double targetScaleX = -1.0, double targetScaleY = -1.0);
 
 void ensureLayerPixels(DocumentItem& d, LayerItem& l);
+// Display-name to engine blend mode (lives in app_state.cpp).
+pittore::compute::BlendMode engineBlendMode(const QString& name);
 // Flat relief plane matching the layer's pixel dims (no-op without pixels).
 void ensureLayerHeight(LayerItem& l);
 // Relief plane for a target of w*h, or null when absent or stale-sized.
@@ -85,5 +87,15 @@ int layerTokenEnd(const QVector<LayerItem>& layers, int start);
 // carries its whole subtree. Returns the sorted unit; `base` receives the
 // shallowest indent among them.
 QVector<int> layerMoveUnit(const DocumentItem* d, int* base = nullptr);
+
+// Repair indent jumps so token walks (layerTokenEnd) and ancestor scans
+// (DocumentItem::enclosingGroups / effectiveVisibility) agree: every row must
+// sit at most one level deeper than its predecessor, and a row deeper than
+// its nearest shallower predecessor must hang under a Group (pixel rows
+// cannot parent children). Grouping or re-parenting rows gathered from
+// different nesting levels can otherwise strand a child behind a pixel row,
+// where the token claims it for the group but the scan-back (and the
+// composite) treats it as outside — the group eye then misses it.
+void normalizeLayerIndents(QVector<LayerItem>& layers);
 
 }  // namespace pittore::ui

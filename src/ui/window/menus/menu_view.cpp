@@ -45,6 +45,8 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <optional>
+#include <utility>
 
 #include "engine/ai/bg_remove.h"
 #include "engine/compute/factory.h"
@@ -53,6 +55,7 @@
 #include "engine/core/tonal_ops.h"
 #include "ui/ai_models.h"
 #include "ui/canvas_view.h"
+#include "ui/canvas/paint/canvas_display_mode.h"
 #include "ui/contextual_task_bar.h"
 #include "ui/export_dialog.h"
 #include "ui/icons.h"
@@ -149,6 +152,44 @@ void MainWindow::buildViewMenu() {
                         });
     viewMenuRefreshers_.push_back([extrasA, this] {
         extrasA->setChecked(canvas_->extrasVisible());
+    });
+    // Display Mode: full fidelity, cheaper draft for heavy documents, or
+    // hairline outlines. Automatic (default) lets slow frames degrade Full
+    // to Draft and recover on their own; the three pins override that.
+    QMenu* displayMenu = view->addMenu(tr("Display Mode"));
+    QActionGroup* displayGroup = new QActionGroup(displayMenu);
+    displayGroup->setExclusive(true);
+    const std::pair<QString, std::optional<CanvasDisplayMode>> displayModes[] = {
+        {tr("Automatic"), std::nullopt},
+        {tr("Full Quality"), CanvasDisplayMode::Full},
+        {tr("Draft (Faster)"), CanvasDisplayMode::Draft},
+        {tr("Outline"), CanvasDisplayMode::Outline},
+    };
+    QList<QAction*> displayActs;
+    for (const auto& [name, mode] : displayModes) {
+        QAction* a =
+            makeCheckableAction(displayMenu, name, QString(), false,
+                                [this, mode](bool) {
+                                    DisplayModeGovernor::instance()
+                                        .setOverride(state_->activeDocument(),
+                                                     mode);
+                                    canvas_->refresh();
+                                });
+        a->setActionGroup(displayGroup);
+        displayActs.append(a);
+    }
+    viewMenuRefreshers_.push_back([displayActs, this] {
+        const auto current = DisplayModeGovernor::instance().overrideFor(
+            state_->activeDocument());
+        const CanvasDisplayMode pins[] = {CanvasDisplayMode::Full,
+                                          CanvasDisplayMode::Draft,
+                                          CanvasDisplayMode::Outline};
+        for (int i = 0; i < displayActs.size(); ++i) {
+            const QSignalBlocker block(displayActs[i]);
+            displayActs[i]->setChecked(
+                i == 0 ? !current.has_value()
+                       : (current.has_value() && *current == pins[i - 1]));
+        }
     });
     QAction* tabletA =
     makeCheckableAction(view, tr("Tablet Mode"), QString(),

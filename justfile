@@ -8,24 +8,33 @@ set shell := ["bash", "-o", "pipefail", "-c"]
 # and failing. Prepend the standard locations so user-shell builds resolve.
 export PATH := "/opt/cuda/bin:/opt/rocm/bin:" + env_var("PATH")
 
+# Build parallelism cap: ninja defaults to core-count jobs, but the test
+# tree compiles app_state.cpp (~1GB RSS with debug info) into ~60 test
+# binaries, so uncapped parallelism OOMs ordinary desktops. Budget ~3GB
+# per job from MemAvailable, clamped to [1, nproc]; PITTORE_JOBS overrides
+# outright. (The per-test recompilation itself is the deeper cost — see
+# tests/meson.build ui_core_sources; unifying that into one static lib is
+# the follow-up if build times still hurt.)
+JOBS := env_var_or_default("PITTORE_JOBS", `n=$(nproc); j=$(awk '/MemAvailable/{print int($2/3072000)}' /proc/meminfo); [ "${j:-0}" -lt 1 ] && j=1; [ "$j" -gt "$n" ] && j=$n; echo "$j"`)
+
 # Configure (first run only) + build only what changed into ./build.
 # Plain ninja tracks header/source mtimes, so repeat runs are no-ops when
 # nothing changed. Do NOT reconfigure here: `meson setup --reconfigure`
 # re-probes Qt/CUDA/HIP and regenerates the manifest on every run, which
 # needlessly widens multi-hundred-target rebuilds (app_state.cpp is also
-# compiled into ~20 test binaries by design, see tests/meson.build).
+# compiled into ~60 test binaries by design, see tests/meson.build).
 # GPU backends are auto-detected: CUDA when nvcc exists, HIP when hipcc exists.
 # Override with:  meson configure build -Dbackend-cuda=disabled
 build:
 	test -f build/build.ninja || meson setup build --prefix=/usr
-	ninja -C build
+	ninja -C build -j{{JOBS}}
 
 # Re-run Meson configuration (added/renamed files, new options, Qt/deps
 # changes), then build. Use this instead of `build` when the file list or
 # build options changed.
 reconf:
 	meson setup --reconfigure build
-	ninja -C build
+	ninja -C build -j{{JOBS}}
 
 # Build and run the full test suite (engine + kernel parity).
 test: build
@@ -42,7 +51,7 @@ test: build
 # with:  meson configure build -Dbuildtype=debugoptimized
 app:
 	test -f build/build.ninja && meson configure build -Dbuildtype=release || meson setup build --prefix=/usr -Dbuildtype=release
-	ninja -C build src/app/painter
+	ninja -C build -j{{JOBS}} src/app/painter
 
 # Single-binary test runner — send this to a friend.
 test-all: build
@@ -74,8 +83,16 @@ model id: app
 # This always installs a RELEASE build: shipping a debug binary is not useful
 # to anyone but you. Build a debug tree locally with `./build.sh --buildtype=debug`
 # and switch it back to release with `meson configure build -Dbuildtype=release`.
-install: app
-	sudo meson install -C build --no-rebuild
+install:
+    # sudo-safe: when the whole command runs as root (`sudo just install`),
+    # de-escalate the build to the invoking user. A root build runs with
+    # sudo's scrubbed environment and litters build/ with root-owned objects,
+    # so the install that follows can ship a stale binary (and later
+    # user-shell builds trip over the root-owned files). Only this install
+    # step needs root. Plain `just install` is unchanged: SUDO_USER is unset
+    # outside sudo, so it builds as you as before.
+    if [ -n "${SUDO_USER:-}" ] && [ "$(id -u)" = 0 ] && [ "$SUDO_USER" != root ]; then sudo -u "$SUDO_USER" just app; else just app; fi
+    sudo meson install -C build --no-rebuild
 
 # Remove what 'install' placed (ninja uninstall runs a script, no rebuild).
 uninstall:
@@ -100,4 +117,4 @@ ai-catalog: app
 deps-ai:
 	sudo pacman -S --needed onnxruntime-cuda
 	meson configure build -Donnxruntime-root=
-	ninja -C build
+	ninja -C build -j{{JOBS}}

@@ -14,6 +14,7 @@
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QDragEnterEvent>
+#include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -44,6 +45,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <functional>
 
 #include "engine/ai/bg_remove.h"
 #include "engine/compute/factory.h"
@@ -73,6 +75,40 @@
 
 namespace pittore::ui {
 
+// A document tab strip that also accepts file drops: dragging an image onto
+// the tab bar opens it as its own document (Photoshop behaviour). Drops on
+// the canvas viewport place as layers instead; this only owns the tab strip.
+// Non-file drags (internal tab reorders) fall through to QTabBar untouched.
+class DocumentTabBar final : public QTabBar {
+  public:
+    explicit DocumentTabBar(QWidget* parent = nullptr) : QTabBar(parent) {}
+    std::function<bool(const QMimeData*)> canDrop;
+    std::function<void(const QMimeData*)> handleDrop;
+
+  protected:
+    void dragEnterEvent(QDragEnterEvent* event) override {
+        if (canDrop && canDrop(event->mimeData())) {
+            event->acceptProposedAction();
+            return;
+        }
+        QTabBar::dragEnterEvent(event);
+    }
+    void dragMoveEvent(QDragMoveEvent* event) override {
+        if (canDrop && canDrop(event->mimeData())) {
+            event->acceptProposedAction();
+            return;
+        }
+        QTabBar::dragMoveEvent(event);
+    }
+    void dropEvent(QDropEvent* event) override {
+        if (canDrop && canDrop(event->mimeData())) {
+            event->acceptProposedAction();
+            if (handleDrop) handleDrop(event->mimeData());
+            return;
+        }
+        QTabBar::dropEvent(event);
+    }
+};
 
 // ---------------------------------------------------------------------------
 // D: document area
@@ -96,7 +132,10 @@ void MainWindow::buildDocumentArea() {
 
     // R25: documents are tabs by default; a tab dragged out becomes a floating
     // window, and Window > Arrange > Consolidate brings them back.
-    documentTabs_ = new QTabBar(central);
+    // A file dragged onto the strip opens as its own document (Photoshop):
+    // canvas drops place as layers, tab-strip drops open as new tabs.
+    auto* tabStrip = new DocumentTabBar(central);
+    documentTabs_ = tabStrip;
     documentTabs_->setObjectName(QStringLiteral("documentTabs"));
     documentTabs_->setExpanding(false);
     documentTabs_->setMovable(true);
@@ -104,6 +143,38 @@ void MainWindow::buildDocumentArea() {
     documentTabs_->setDrawBase(false);
     documentTabs_->setUsesScrollButtons(true);
     documentTabs_->setElideMode(Qt::ElideRight);
+    documentTabs_->setAcceptDrops(true);
+    documentTabs_->setToolTip(tr("Drag images here to open as new documents"));
+    tabStrip->canDrop = [](const QMimeData* mime) {
+        return mime && (mime->hasImage() || dropHasOpenableFiles(mime));
+    };
+    tabStrip->handleDrop = [this](const QMimeData* mime) {
+        bool openedFile = false;
+        if (mime->hasUrls()) {
+            for (const QUrl& url : mime->urls()) {
+                if (!url.isLocalFile()) continue;
+                const QString localPath = url.toLocalFile();
+                if (!suffixIsOpenable(QFileInfo(localPath).suffix())) continue;
+                openProjectFile(localPath);
+                openedFile = true;
+            }
+        }
+        // Raw image data (e.g. dragged from another app) with no openable
+        // file underneath becomes a new document at native size.
+        if (!openedFile && mime->hasImage()) {
+            const QImage img = qvariant_cast<QImage>(mime->imageData());
+            if (img.isNull()) return;
+            DocumentItem* doc = state_->addDocument(
+                tr("Dropped Image"), img.size(), 300);
+            if (!doc) return;
+            state_->placeImageLayer(img, doc->title,
+                                    QPointF(img.width() / 2.0, img.height() / 2.0),
+                                    1.0);
+            canvas_->zoomToFit();
+            syncDocumentTabs();
+            updateStatus();
+        }
+    };
     connect(documentTabs_, &QTabBar::currentChanged, this, [this](int index) {
         if (suppressTabSync_) return;
         state_->setActiveDocumentIndex(index);

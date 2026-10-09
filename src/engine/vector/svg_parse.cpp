@@ -109,10 +109,7 @@ bool read_attr(std::string_view s, std::size_t& i, Attr& a) {
         ++i;
     if (i >= s.size()) return false;
     const std::size_t kstart = i;
-    while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '=' ||
-                            s[i] == '"' || s[i] == '\'' || s[i] == '\n' ||
-                            s[i] == '/' || s[i] == '>' || s[i] == '<'))
-        ++i;
+    while (i < s.size() && is_name_char(s[i])) ++i;
     a.key = s.substr(kstart, i - kstart);
     if (a.key.empty()) return false;  // hit tag end; caller breaks
     while (i < s.size() && (s[i] == ' ' || s[i] == '\t'))
@@ -243,6 +240,17 @@ VectorScene parse_svg(const std::string& xml, const std::string& name) {
         if (closing) ++i;
         const std::string_view tag = read_token(s, i);
 
+        // Closing tags carry no attrs; never run open-tag logic for them
+        // (</svg> must not reset the viewport, </circle> must not emit).
+        if (closing) {
+            if (tag == "linearGradient" || tag == "radialGradient") {
+                cur_grad = -1;
+            }
+            while (i < s.size() && s[i] != '>') ++i;
+            if (i < s.size()) ++i;
+            continue;
+        }
+
         std::string_view x, y, w, h, r, cx, cy;
         std::string_view x1, y1, x2, y2;
         std::string_view fill, stroke, sw, id, style, offset;
@@ -345,11 +353,6 @@ VectorScene parse_svg(const std::string& xml, const std::string& name) {
             st.r = col[0]; st.g = col[1]; st.b = col[2]; st.a = col[3];
             P.scene.stops.push_back(st);
             ++P.grads[static_cast<std::size_t>(cur_grad)].stop_count;
-            continue;
-        }
-
-        if (closing && (tag == "linearGradient" || tag == "radialGradient")) {
-            cur_grad = -1;
             continue;
         }
 

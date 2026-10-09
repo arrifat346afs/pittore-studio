@@ -134,12 +134,23 @@ std::vector<std::uint8_t> buildRgba8Png(std::uint32_t w, std::uint32_t h,
 }
 
 std::vector<std::uint8_t> afHeaderTail(const std::string& jsonTail) {
+    // Named spans, not braced insert lists: GCC's -Wstringop-overflow
+    // heuristic misfires on vector::insert(initializer_list) for small
+    // constant spans. Same bytes in the same order.
+    static constexpr unsigned char kMagic[] = {0x00, 0xff, 0x4b, 0x41,
+                                               0x0c, 0x00, 0x04, 0x02};
+    static constexpr unsigned char kKind[] = {'n', 's', 'r', 'P',
+                                              '#', 'I', 'n', 'f'};
+    static constexpr unsigned char kMarker[] = {0x3a, 0, 0, 0};
+    static constexpr unsigned char kProto[] = {'P', 'r', 'o', 't',
+                                               'M', '5', 0, 0};
     std::vector<std::uint8_t> out;
-    out.insert(out.end(), {0x00, 0xff, 0x4b, 0x41, 0x0c, 0x00, 0x04, 0x02});
-    out.insert(out.end(), {'n', 's', 'r', 'P', '#', 'I', 'n', 'f'});
+    out.reserve(64 + jsonTail.size());
+    out.insert(out.end(), std::begin(kMagic), std::end(kMagic));
+    out.insert(out.end(), std::begin(kKind), std::end(kKind));
     out.insert(out.end(), 40, 0);                       // five u64 LE fields
-    out.insert(out.end(), {0x3a, 0, 0, 0});             // section marker
-    out.insert(out.end(), {'P', 'r', 'o', 't', 'M', '5', 0, 0});
+    out.insert(out.end(), std::begin(kMarker), std::end(kMarker));
+    out.insert(out.end(), std::begin(kProto), std::end(kProto));
     out.insert(out.end(), jsonTail.begin(), jsonTail.end());
     return out;
 }

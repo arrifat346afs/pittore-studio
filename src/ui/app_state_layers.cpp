@@ -364,6 +364,11 @@ int AppState::groupSelectedLayers() {
         stack.append(d->layers[i]);
     }
 
+    // Selections gathered across nesting levels re-indent with gaps (a child
+    // moved without its header jumps more than one level, or lands behind a
+    // pixel row). Repair those before committing so the group token and the
+    // ancestor scans agree on what the new header owns.
+    normalizeLayerIndents(stack);
     d->beginUndoAction();
     d->layers = stack;
     d->selectedLayers.clear();
@@ -425,6 +430,7 @@ int AppState::makeToneBlendGroup() {
         }
         for (int i = end + 1; i < d->layers.size(); ++i)
             stack.append(d->layers[i]);
+        normalizeLayerIndents(stack);
         d->beginUndoAction();
         d->layers = stack;
         d->selectedLayers.clear();
@@ -519,6 +525,10 @@ bool AppState::ungroupSelectedLayers() {
         stack.append(l);
     }
 
+    // Promoting children can leave a row deeper than its new predecessor
+    // allows; repair so the remaining groups keep owning their rows.
+    normalizeLayerIndents(stack);
+    // newSel holds positions, which normalization never reorders.
     d->beginUndoAction();
     d->layers = stack;
     d->selectedLayers = newSel;
@@ -764,6 +774,10 @@ bool AppState::reparentSelectedLayers(int targetIndex, int targetIndent) {
         }
     }
 
+    // Drops across nesting levels re-indent with gaps just like grouping;
+    // repair so moved rows land inside the group they were dropped into.
+    // movedNew holds positions, which normalization never reorders.
+    normalizeLayerIndents(stack);
     d->beginUndoAction();
     d->layers = stack;
     d->selectedLayers = movedNew;

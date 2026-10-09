@@ -228,7 +228,10 @@ static void test_region_matches_full_frame() {
                                           {w - 40, h - 24, w, h},
                                           {0, 0, w, h}};
         for (auto& r : rects) {
-            reg = g;
+            // assign, not operator=: identical copy (sizes match by
+            // construction), without the reallocation path that trips
+            // GCC's -Wstringop-overflow heuristic here.
+            reg.assign(g.begin(), g.end());
             CHECK(applyToneBlendRegion(g.data(), b.data(), reg.data(), w, h,
                                        r[0], r[1], r[2], r[3], p));
             for (std::size_t i = 0; i < n; ++i) {

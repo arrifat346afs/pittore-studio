@@ -1302,7 +1302,7 @@ int main(int argc, char** argv) {
     // outline): long diagonal like a real gesture, interior must ink.
     {
         // Geometry-vs-bake split: render the COMMITTED art (with its
-        // stored matrix) the way paintVectorLayer does, and diff
+        // stored matrix) straight from geometry, and diff
         // against the baked layer pixels.
         state.addDocument(QStringLiteral("vbrushgeom"), QSize(200, 150),
                           300);
@@ -1476,7 +1476,10 @@ int main(int argc, char** argv) {
                 int dpi = 96;
                 QString error;
                 CHECK(svgPartsImport(f.readAll(), &result, &dpi, &error));
-                CHECK(result.layers.size() < 1000);
+                // One row per shape and group (no run merging): 27 group
+                // rows plus one layer per part. Bounded well under the
+                // pathological-file rescue, which must never fire here.
+                CHECK(result.layers.size() < 4096);
                 CHECK(result.docSize == QSize(951, 942));
                 AppState st;
                 QString openError;

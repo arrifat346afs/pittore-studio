@@ -99,8 +99,16 @@ void CanvasView::updateScrollRange() {
     }
     const QSizeF scaled = scaledDocumentSize();
     const QSize view = viewport()->size();
-    horizontalScrollBar()->setRange(0, qMax(0, int(scaled.width()) - view.width()));
-    verticalScrollBar()->setRange(0, qMax(0, int(scaled.height()) - view.height()));
+    // Infinite zoom can scale far past int range: saturate the scrollbar
+    // instead of overflowing the conversion. Panning past INT_MAX view
+    // pixels is unreachable by bar, but nothing overflows.
+    const auto excessRange = [](double scaledSide, int viewSide) {
+        const double excess = scaledSide - viewSide;
+        if (!(excess > 0.0)) return 0;
+        return int(std::min(excess, 2147483647.0));  // INT_MAX
+    };
+    horizontalScrollBar()->setRange(0, excessRange(scaled.width(), view.width()));
+    verticalScrollBar()->setRange(0, excessRange(scaled.height(), view.height()));
     horizontalScrollBar()->setPageStep(view.width());
     verticalScrollBar()->setPageStep(view.height());
     horizontalScrollBar()->setSingleStep(32);
@@ -111,14 +119,18 @@ void CanvasView::updateScrollRange() {
 void CanvasView::setZoom(double zoom, QPointF anchor) {
     DocumentItem* d = doc();
     if (!d) return;
-    const double clamped = qBound(zoomSteps().first(), zoom, zoomSteps().last());
-    if (qFuzzyCompare(clamped, d->zoom)) return;
+    // Infinite zoom: the ladder only steps the keys/tool; direct sets pass
+    // through geometrically to the sanity rails. Non-positive and
+    // non-finite inputs are rejected, never clamped into a surprise value.
+    if (!(zoom > 0.0) || !std::isfinite(zoom)) return;
+    const double z = qBound(kMinZoom, zoom, kMaxZoom);
+    if (qFuzzyCompare(z, d->zoom)) return;
 
     const QPointF anchorPoint =
         anchor.x() < 0 ? QPointF(viewport()->width() / 2.0, viewport()->height() / 2.0) : anchor;
     const QPointF docAnchor = viewToDocument(anchorPoint);
 
-    d->zoom = clamped;
+    d->zoom = z;
     updateScrollRange();
     // Zoom-coupled vector display is rebaked on settle, not per tick: a
     // synchronous rebake here re-rasterizes every art layer at ceil(zoom)²
@@ -140,7 +152,7 @@ void CanvasView::setZoom(double zoom, QPointF anchor) {
     horizontalScrollBar()->setValue(horizontalScrollBar()->value() + int(delta.x()));
     verticalScrollBar()->setValue(verticalScrollBar()->value() + int(delta.y()));
 
-    emit zoomChanged(clamped);
+    emit zoomChanged(z);
     refresh();
     brushCursorRect_ = QRectF();   // ring geometry lives in view space
 }
@@ -150,7 +162,8 @@ void CanvasView::zoomIn() {
     const double current = zoom();
     for (double step : zoomSteps())
         if (step > current * 1.0001) return setZoom(step);
-    setZoom(zoomSteps().last());
+    // Past the ladder: geometric continuation to the rails.
+    setZoom(current * 2.0);
 }
 
 
@@ -158,7 +171,8 @@ void CanvasView::zoomOut() {
     const double current = zoom();
     for (int i = zoomSteps().size() - 1; i >= 0; --i)
         if (zoomSteps()[i] < current * 0.9999) return setZoom(zoomSteps()[i]);
-    setZoom(zoomSteps().first());
+    // Past the ladder: geometric continuation to the rails.
+    setZoom(current * 0.5);
 }
 
 
@@ -168,7 +182,7 @@ void CanvasView::zoomToFit() {
     const QSize view = viewport()->size();
     const double fit = qMin((view.width() - 32.0) / d->size.width(),
                             (view.height() - 32.0) / d->size.height());
-    setZoom(qMax(fit, zoomSteps().first()));
+    setZoom(fit);  // validated inside; tiny fits pass through unclamped
 }
 
 
@@ -186,7 +200,7 @@ void CanvasView::zoomToWidth() {
     if (!d || d->size.isEmpty()) return;
     const QSize view = viewport()->size();
     const double fit = (view.width() - 16.0) / d->size.width();
-    setZoom(qMax(fit, zoomSteps().first()));
+    setZoom(fit);  // validated inside; tiny fits pass through unclamped
 }
 
 
@@ -199,7 +213,7 @@ void CanvasView::zoomToActiveLayer() {
     const QSize view = viewport()->size();
     const double fit = qMin((view.width() - 32.0) / bounds.width(),
                             (view.height() - 32.0) / bounds.height());
-    setZoom(qMax(fit, zoomSteps().first()));
+    setZoom(fit);  // validated inside; tiny fits pass through unclamped
 }
 
 

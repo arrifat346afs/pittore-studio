@@ -18,6 +18,55 @@
 
 namespace pittore::ui {
 
+namespace {
+
+// Zoom-density bucket shared by every rebake below: ceil(zoom) clamped to
+// 1..16, then capped so footprint*k stays within 2048 px on the long edge.
+// The settle sweep predicts this bucket from the cached footprint, so
+// unchanged densities skip both the geometry walk and the re-rasterize.
+double zoomDensityBucket(double zoom, double longEdge) {
+    double kf = std::clamp(std::ceil(zoom - 1e-9), 1.0, 16.0);
+    if (longEdge > 0.0)
+        return std::max(1.0, std::min(kf, std::floor(2048.0 / longEdge)));
+    return kf;
+}
+
+// Cached-footprint validity for a single-art row: the box was measured
+// under this stamp + placement, and the layer holds no other geometry kind.
+bool artFootprintFresh(const LayerItem& l, std::uint64_t stamp) {
+    return !l.styledFootprint.isNull() &&
+           l.styledFootprintStamp == stamp && l.flatArt.empty() &&
+           !l.sharedNode && l.styledBaseOffset == l.offset &&
+           l.styledBaseScaleX == l.scaleX && l.styledBaseScaleY == l.scaleY;
+}
+
+// Same for a flattened row (union box over flatArt, pinned by flatStamp).
+bool flatFootprintFresh(const LayerItem& l) {
+    return !l.styledFootprint.isNull() &&
+           l.styledFootprintStamp == l.flatStamp &&
+           (!l.art || l.art->isEmpty()) && !l.flatArt.empty() &&
+           l.styledBaseOffset == l.offset &&
+           l.styledBaseScaleX == l.scaleX && l.styledBaseScaleY == l.scaleY;
+}
+
+void storeFootprint(LayerItem& l, const QRectF& box, std::uint64_t stamp) {
+    l.styledFootprint = box;
+    l.styledFootprintStamp = stamp;
+    l.styledBaseOffset = l.offset;
+    l.styledBaseScaleX = l.scaleX;
+    l.styledBaseScaleY = l.scaleY;
+}
+
+void dropDenseBake(LayerItem& l) {
+    if (l.styled && l.styledResample > 1.0) {
+        l.styled.reset();
+        ++l.styledRev;
+    }
+    l.styledValid = false;
+}
+
+}  // namespace
+
 int vectorEditableLayer(AppState* state) {
     DocumentItem* d = state ? state->activeDocument() : nullptr;
     if (!d) return -1;
@@ -34,6 +83,23 @@ void bakeArtDense(LayerItem& l, double zoom) {
     if (!l.art || l.art->isEmpty() || !l.pixels) return;
     if (!l.style.empty()) return;
     if (l.hasLiveFilter && l.liveFilterEnabled) return;
+    // Cached-geometry fast path: the bucket follows from the stored
+    // footprint, so an unchanged density skips the path walk below and the
+    // rasterize after it. A changed bucket falls through to the full bake.
+    if (artFootprintFresh(l, l.sourceStamp)) {
+        const double edge = std::max(l.styledFootprint.width(),
+                                     l.styledFootprint.height());
+        const double want = zoomDensityBucket(zoom, edge);
+        const bool hasDense =
+            l.styledValid && l.styled && l.styledResample > 1.0;
+        if (want > 1.0 && hasDense && l.styledResample == want) return;
+        if (want <= 1.0) {
+            // Document resolution suffices (same drop the full path does):
+            // no geometry walk needed, just retire a stale dense bake.
+            dropDenseBake(l);
+            return;
+        }
+    }
     double kf = std::clamp(std::ceil(zoom - 1e-9), 1.0, 16.0);
     // Cap the dense image: footprint*k long edge stays within 2048 px. The
     // old 4096 cap let one zoomed circle bake a 4000×4000 RGBAf styled image
@@ -53,7 +119,11 @@ void bakeArtDense(LayerItem& l, double zoom) {
     if (longEdge > 0.0) k = std::max(1.0, std::min(kf, std::floor(2048.0 / longEdge)));
     if (k <= 1.0) {
         // Document resolution suffices: drop any stale dense bake so the
-        // pixels path (already exact) serves, freeing the memory.
+        // pixels path (already exact) serves, freeing the memory. The
+        // footprint is still stored so the next settle can decide without
+        // walking the geometry again.
+        if (l.flatArt.empty() && !l.sharedNode)
+            storeFootprint(l, footprint, l.sourceStamp);
         if (l.styled && l.styledResample > 1.0) {
             l.styled.reset();
             ++l.styledRev;
@@ -98,6 +168,10 @@ void bakeArtDense(LayerItem& l, double zoom) {
     l.styledBaseScaleY = l.scaleY;
     l.styledValid = true;
     ++l.styledRev;
+    if (l.flatArt.empty() && !l.sharedNode) {
+        l.styledFootprint = footprint;
+        l.styledFootprintStamp = l.sourceStamp;
+    }
 }
 
 bool AppState::refreshVectorArt() {
@@ -273,6 +347,21 @@ void rebakeFlatRow(LayerItem& l, double zoom) {
         dropDense();
         return;
     }
+    // Cached-geometry fast path (same deal as the single-art bake, but over
+    // the margined union box): an unchanged bucket skips the member walk
+    // and the re-rasterize below.
+    if (flatFootprintFresh(l)) {
+        const double edge = std::max(l.styledFootprint.width(),
+                                     l.styledFootprint.height());
+        const double want = zoomDensityBucket(zoom, edge);
+        const bool hasDense =
+            l.styledValid && l.styled && l.styledResample > 1.0;
+        if (want > 1.0 && hasDense && l.styledResample == want) return;
+        if (want <= 1.0) {
+            dropDense();
+            return;
+        }
+    }
     const QTransform place =
         QTransform().scale(l.scaleX, l.scaleY) *
         QTransform().translate(l.offset.x(), l.offset.y());
@@ -313,6 +402,8 @@ void rebakeFlatRow(LayerItem& l, double zoom) {
     if (longEdge > 0.0)
         k = std::max(1.0, std::min(kf, std::floor(2048.0 / longEdge)));
     if (k <= 1.0) {
+        if (!l.art || l.art->isEmpty())
+            storeFootprint(l, QRectF(ir), l.flatStamp);
         dropDense();
         return;
     }
@@ -357,6 +448,10 @@ void rebakeFlatRow(LayerItem& l, double zoom) {
     l.styledBaseScaleY = l.scaleY;
     l.styledValid = true;
     ++l.styledRev;
+    if (!l.art || l.art->isEmpty()) {
+        l.styledFootprint = QRectF(ir);
+        l.styledFootprintStamp = l.flatStamp;
+    }
 }
 
 void rebakeSharedRow(LayerItem& l, double zoom, const QRectF& visible) {
@@ -377,6 +472,36 @@ void rebakeSharedRow(LayerItem& l, double zoom, const QRectF& visible) {
     if (l.sourceStamp != l.flatStamp) {
         dropDense();
         return;
+    }
+    // Document resolution suffices (mirrors sharedRowBake's own density-1
+    // refusal): drop any stale dense bake without walking or rasterizing
+    // the subtree at all.
+    if (std::clamp(std::ceil(zoom - 1e-9), 1.0, 16.0) <= 1.0) {
+        dropDense();
+        return;
+    }
+    // Cached-footprint fast path (same deal as the flattened rows): the
+    // density bucket follows from the last baked box, so an unchanged
+    // bucket skips the subtree walk and re-rasterize entirely. This is what
+    // keeps every zoom settle from re-baking hundreds of sealed group rows.
+    // Only for whole-row bakes (visible null, as the settle passes): a
+    // viewport-culled bake covers less, so it never validates a full one.
+    if (visible.isNull() && !l.styledFootprint.isNull() &&
+        l.styledFootprintStamp == l.flatStamp &&
+        l.styledBaseOffset == l.offset &&
+        l.styledBaseScaleX == l.scaleX && l.styledBaseScaleY == l.scaleY) {
+        const double edge = std::max(l.styledFootprint.width(),
+                                     l.styledFootprint.height());
+        const double want = zoomDensityBucket(zoom, edge);
+        const bool hasDense =
+            l.styledValid && l.styled && l.styledResample > 1.0;
+        if (want > 1.0 && hasDense && l.styledResample == want &&
+            l.styledView == l.styledFootprint)
+            return;
+        if (want <= 1.0) {
+            dropDense();
+            return;
+        }
     }
     const QTransform place =
         QTransform().scale(l.scaleX, l.scaleY) *
@@ -411,11 +536,19 @@ void rebakeSharedRow(LayerItem& l, double zoom, const QRectF& visible) {
     l.styledBaseScaleY = l.scaleY;
     l.styledValid = true;
     ++l.styledRev;
+    l.styledFootprint = baked;
+    l.styledFootprintStamp = l.flatStamp;
 }
 
 bool AppState::rezoomVectorArt() {
     DocumentItem* d = activeDocument();
     if (!d) return false;
+    // Past heavy-document scale the tile store owns zoom sharpness (density
+    // tiles re-rasterize the visible vector stack per bucket in the
+    // background). A dense per-layer rebake plus a full 80k-layer
+    // recomposite here costs seconds per zoom step for pixels the tiles
+    // already cover, and the revision bump discards those very tiles.
+    if (d->layers.size() >= 2000) return false;
     bool done = false;
     for (int i = 0; i < d->layers.size(); ++i) {
         LayerItem& l = d->layers[i];  // bake only reads + writes styled fields

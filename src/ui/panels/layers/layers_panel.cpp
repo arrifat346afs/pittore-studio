@@ -32,6 +32,7 @@
 #include <QPainterPath>
 #include <QPixmap>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStringList>
@@ -57,36 +58,75 @@
 namespace pittore::ui {
 namespace {
 
+// Fixed row geometry: rows are positioned manually (see rebuild), so the
+// height lives in one place. The end slack keeps an empty drop zone below
+// the last row for end-of-list drops.
+constexpr int kRowHeight = 40;
+// Pool overscan each side of the viewport: scrolling within the overscan
+// rebinds nothing, so steady scrolling costs one repaint per new row.
+constexpr int kWindowOver = 10;
+constexpr int kEndSlack = 200;
+
 
 class LayerRow final : public QWidget {
   public:
-    LayerRow(AppState* state, int index, LayerDropState* drop, QWidget* parent)
-        : QWidget(parent), state_(state), index_(index), drop_(drop) {
-        setFixedHeight(40);
+    LayerRow(AppState* state, int index, LayerDropState* drop, QWidget* parent,
+             QVector<LayerRow*>* siblings)
+        : QWidget(parent),
+          state_(state),
+          index_(index),
+          drop_(drop),
+          siblings_(siblings) {
+        setFixedHeight(kRowHeight);
         setAutoFillBackground(false);
         // Clicking a row must take keyboard focus: otherwise Del keeps going to
         // whatever was focused before (commonly an opacity/size spinbox), and
         // the app's Delete-layer handler never sees it.
         setFocusPolicy(Qt::ClickFocus);
         setAcceptDrops(true);
-        // Inline name editor: hidden until startRename() opens it (context menu
-        // "Rename…", double-click on the name, or a freshly created group).
-        renameEdit_ = new QLineEdit(this);
-        renameEdit_->hide();
-        // Commits on Return and on focus-out; Esc cancels via the event filter
-        // below. The renaming_ flag makes the second editingFinished (focus is
-        // pulled away by hide()) a no-op.
-        connect(renameEdit_, &QLineEdit::editingFinished, this,
-                [this] { finishRename(); });
-        renameEdit_->installEventFilter(this);
+        // The inline name editor is created on demand in startRename(), not
+        // here: one QLineEdit per row doubles widget count, and widget
+        // teardown scans the posted-event queue per row (minutes on huge
+        // documents), so rows stay editor-free until renamed.
     }
+
+    // Rebind a pooled row to another layer index (the pool covers the
+    // visible window, not the whole stack, so a structural change or a
+    // scroll only rebinds indices instead of creating widgets). Same
+    // index is a no-op; the panel's own repaint covers content edits.
+    // An in-flight rename cannot survive a rebind, so it is cancelled.
+    void setIndex(int index) {
+        if (index == index_) return;
+        cancelRename();
+        index_ = index;
+        // Observable binding for tests and tools: pooled rows move, so
+        // position in the child list means nothing.
+        setProperty("layerIndex", index_);
+        dragStarted_ = false;
+        pressWasMulti_ = false;
+        update();
+    }
+
+    int layerIndex() const { return index_; }
 
     // Opens the inline editor on this row, pre-filled with the layer name and
     // fully selected so typing replaces it. Used by the context menu, by
     // double-clicking the name, and by the panel when a group is created.
+    // The editor is built on first use (see the constructor): most rows are
+    // never renamed, so most rows never pay for it.
     void startRename() {
         DocumentItem* d = state_->activeDocument();
-        if (!d || index_ >= d->layers.size() || renaming_) return;
+        if (!d || index_ < 0 || index_ >= d->layers.size() || renaming_) return;
+        if (!renameEdit_) {
+            renameEdit_ = new QLineEdit(this);
+            renameEdit_->hide();
+            // Commits on Return and on focus-out; Esc cancels via the event
+            // filter below. The renaming_ flag makes the second
+            // editingFinished (focus is pulled away by hide()) a no-op.
+            connect(renameEdit_, &QLineEdit::editingFinished, this,
+                    [this] { finishRename(); });
+            renameEdit_->installEventFilter(this);
+        }
         renaming_ = true;
         renameEdit_->setText(d->layers[index_].name);
         renameEdit_->setGeometry(nameRect().adjusted(0, 5, -2, -5));
@@ -98,7 +138,7 @@ class LayerRow final : public QWidget {
   protected:
     void paintEvent(QPaintEvent*) override {
         DocumentItem* d = state_->activeDocument();
-        if (!d || index_ >= d->layers.size()) return;
+        if (!d || index_ < 0 || index_ >= d->layers.size()) return;
         const LayerItem& layer = d->layers[index_];
         const ThemeColors c = colorsFor(state_->theme());
         const bool active = d->activeLayer == index_;
@@ -271,11 +311,12 @@ class LayerRow final : public QWidget {
 
     void mousePressEvent(QMouseEvent* event) override {
         DocumentItem* d = state_->activeDocument();
-        if (!d || index_ >= static_cast<int>(d->layers.size())) return;
+        if (!d || index_ < 0 || index_ >= static_cast<int>(d->layers.size())) return;
         // Only the left button selects. A right-click must not collapse the
         // multi-selection: it is delivered as BOTH a press and a
         // contextMenuEvent, and the menu must operate on the set as it was.
         if (event->button() != Qt::LeftButton) return;
+        pressWasMulti_ = false;
         // Ctrl+left-click on the thumbnail loads the layer's transparency as
         // the selection marquee (the Ctrl+click thumbnail): the layer's
         // alpha channel becomes the document selection mask, traced at 50%
@@ -449,7 +490,9 @@ class LayerRow final : public QWidget {
             }
             return;
         }
-        // Selection: plain click isolates the row; Ctrl+click toggles it in
+        // Selection: plain click isolates the row (deferred to release when
+        // the row already belongs to a multi-selection, so a press-drag
+        // carries the whole set); Ctrl+click toggles it in
         // the multi-selection; Shift+click selects the contiguous range from
         // the anchor (active layer) to the clicked row — Ctrl+Shift unions
         // the range with the existing set. The set moves/deletes/eyes together.
@@ -471,6 +514,14 @@ class LayerRow final : public QWidget {
                 d->selectedLayers.push_back(index_);
                 d->activeLayer = index_;
             }
+        } else if (d->selectedLayers.contains(index_) &&
+                   d->selectedLayers.size() > 1) {
+            // Press on a member of a multi-selection: keep the set so a drag
+            // moves every selected row, and isolate this row on release when
+            // no drag happened (plain click). Only the active layer follows
+            // the press now, for the canvas gizmo.
+            pressWasMulti_ = true;
+            d->activeLayer = index_;
         } else {
             if (d->selectedLayers.size() == 1 && d->selectedLayers.contains(index_) &&
                 d->activeLayer == index_)
@@ -509,10 +560,12 @@ class LayerRow final : public QWidget {
         if (!(event->buttons() & Qt::LeftButton) || dragStarted_) return;
         if ((event->position() - dragPressPos_).manhattanLength() < 8) return;
         DocumentItem* d = state_->activeDocument();
-        if (!d || index_ >= d->layers.size()) return;
+        if (!d || index_ < 0 || index_ >= d->layers.size()) return;
         // Drag only from the body of a row, not the visibility eye.
         if (state_->selectedLayerIndices().isEmpty()) return;
         dragStarted_ = true;
+        pressWasMulti_ = false;   // the whole set rides the drag; release
+                                  // must not isolate the pressed row after it
         QMimeData* mime = new QMimeData;
         QByteArray payload;
         QDataStream ds(&payload, QIODevice::WriteOnly);
@@ -527,6 +580,26 @@ class LayerRow final : public QWidget {
             ds->row = -1;
             ds->mode = LayerDropState::None;
         }
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        // End of a deferred multi-selection press (no drag happened): a plain
+        // click isolates the released row. A release after a drag, or with a
+        // selection modifier held, leaves the set alone.
+        const bool isolate = pressWasMulti_;
+        pressWasMulti_ = false;
+        if (event->button() != Qt::LeftButton || !isolate || dragStarted_)
+            return;
+        if (event->modifiers().testFlag(Qt::ShiftModifier) ||
+            event->modifiers().testFlag(Qt::ControlModifier) ||
+            event->modifiers().testFlag(Qt::AltModifier))
+            return;
+        DocumentItem* d = state_->activeDocument();
+        if (!d || index_ < 0 || index_ >= static_cast<int>(d->layers.size())) return;
+        d->selectedLayers.clear();
+        d->selectedLayers.push_back(index_);
+        d->activeLayer = index_;
+        emit state_->activeLayerChanged();
     }
 
     void dragEnterEvent(QDragEnterEvent* event) override {
@@ -571,7 +644,7 @@ class LayerRow final : public QWidget {
 
     void contextMenuEvent(QContextMenuEvent* event) override {
         DocumentItem* d = state_->activeDocument();
-        if (!d || index_ >= d->layers.size()) return;
+        if (!d || index_ < 0 || index_ >= d->layers.size()) return;
         // Right-click on an unselected row selects it before acting (so the
         // menu always operates on what the user clicked).
         if (!d->selectedLayers.contains(index_)) {
@@ -732,11 +805,11 @@ class LayerRow final : public QWidget {
     // Commits the edited name as one undoable step. Safe to run twice: the
     // renaming_ flag turns the focus-out fired by hide() into a no-op.
     void finishRename() {
-        if (!renaming_) return;
+        if (!renaming_ || !renameEdit_) return;
         renaming_ = false;
         renameEdit_->hide();
         DocumentItem* d = state_->activeDocument();
-        if (!d || index_ >= d->layers.size()) return;
+        if (!d || index_ < 0 || index_ >= d->layers.size()) return;
         const QString name = d->layers[index_].name;
         const QString next = renameEdit_->text().trimmed();
         if (next.isEmpty() || next == name) return;
@@ -753,7 +826,7 @@ class LayerRow final : public QWidget {
     void cancelRename() {
         if (!renaming_) return;
         renaming_ = false;
-        renameEdit_->hide();
+        if (renameEdit_) renameEdit_->hide();
     }
 
     LayerDropState::Mode dropZoneMode(const QPointF& pos) const {
@@ -791,15 +864,12 @@ class LayerRow final : public QWidget {
         }
     }
 
-    // The sibling LayerRow widget for a document layer index (rows live in the
-    // panel's stack layout with the same order as d->layers).
+    // The sibling LayerRow widget for a document layer index, or null when
+    // the index is off-screen (only the visible window is pooled).
     QWidget* siblingRow(int index) const {
-        if (!parentWidget()) return nullptr;
-        if (auto* stack = qobject_cast<QWidget*>(parentWidget())) {
-            // The stack's layout children are the rows; row i is child i.
-            QLayout* lay = stack->layout();
-            if (lay && index >= 0 && index < lay->count())
-                return lay->itemAt(index)->widget();
+        if (!siblings_) return nullptr;
+        for (LayerRow* row : *siblings_) {
+            if (row && row->layerIndex() == index) return row;
         }
         return nullptr;
     }
@@ -807,8 +877,13 @@ class LayerRow final : public QWidget {
     AppState* state_;
     int index_;
     LayerDropState* drop_ = nullptr;
+    // Panel's row pool (stable address): sibling lookup without the layout.
+    QVector<LayerRow*>* siblings_ = nullptr;
     QPointF dragPressPos_;
     bool dragStarted_ = false;
+    // True between a plain press on a member of a multi-selection and its
+    // release (no drag yet): release isolates the row, a drag carries the set.
+    bool pressWasMulti_ = false;
     QLineEdit* renameEdit_ = nullptr;   // inline name editor (hidden by default)
     bool renaming_ = false;             // true while the editor is open
 };
@@ -920,6 +995,9 @@ class LayersPanel final : public QWidget {
         // stack (the stretch, not a row, receives them).
         stack_->setAcceptDrops(true);
         stack_->installEventFilter(this);
+        // Windowed rows: scrolling rebinds the pool to the new window.
+        connect(scroll_->verticalScrollBar(), &QScrollBar::valueChanged, this,
+                [this] { layoutWindow(false); });
         column->addWidget(scroll_, 1);
 
         QWidget* footer = makePanelFooter(
@@ -963,8 +1041,11 @@ class LayersPanel final : public QWidget {
         // A move/resize drag or a paint stroke marks the touched layer's cached
         // preview stale; repaint the rows so the thumbnail follows. Untouched
         // layers keep their cached image, so only the edited row re-samples.
+        // One container repaint covers the visible rows: per-row update()
+        // posts one paint event each (tens of thousands on huge documents),
+        // flooding the event queue for identical pixels.
         connect(state_, &AppState::documentModified, this, [this](DocumentItem*) {
-            for (LayerRow* row : rows_) row->update();
+            if (stack_) stack_->update();
         });
         connect(opacitySlider_, &QSlider::valueChanged, this, [this](int v) {
             if (opacity_ && opacity_->value() != v) opacity_->setValue(v);
@@ -1044,8 +1125,10 @@ class LayersPanel final : public QWidget {
 
     void syncActive() {
         // Rows read d->activeLayer live, so repainting is enough (Qt clips the
-        // paint to the rows actually visible in the scroll area).
-        for (LayerRow* row : rows_) row->update();
+        // paint to the rows actually visible in the scroll area). One
+        // container repaint, not one event per row: per-row update() posts
+        // tens of thousands of paint events on huge documents.
+        if (stack_) stack_->update();
         if (LayerItem* l = state_->activeLayer()) {
             QSignalBlocker b1(opacity_), b2(fill_), b3(blendMode_);
             const QSignalBlocker b1s(opacitySlider_);
@@ -1118,12 +1201,39 @@ class LayersPanel final : public QWidget {
             }
         }
         if (revealed) rebuild();   // rebuilds rows; scrolls again below
-        if (active < 0 || active >= rows_.size()) return;
-        if (QWidget* w = rows_.at(active))
+        scrollToLayer(active);
+    }
+
+    // Scroll the stack so the given layer's row is visible. Pooled rows
+    // only exist inside the window, so move the window first, then nudge
+    // the scrollbar to the row's absolute position.
+    void scrollToLayer(int index) {
+        const int pos = orderPos(index);
+        if (pos < 0 || !scroll_) return;
+        const int y = pos * kRowHeight;
+        const int vy = scroll_->verticalScrollBar()->value();
+        const int vh = scroll_->viewport()->height();
+        if (y < vy || y + kRowHeight > vy + vh) {
+            scroll_->verticalScrollBar()->setValue(
+                qMax(0, y - vh / 2));
+        }
+        layoutWindow(false);
+        if (QWidget* w = rowWidget(index))
             scroll_->ensureWidgetVisible(w, 0, 40);
     }
 
     bool eventFilter(QObject* obj, QEvent* event) override {
+        // Manual row layout: rows keep the stack width on panel resizes.
+        // Rare (dock resize) and position-only, so a single linear pass.
+        // A wider viewport may fit more rows: grow the pool, then rebind.
+        if (obj == stack_ && event->type() == QEvent::Resize) {
+            const int w = stack_->width();
+            ensurePool(poolNeeded());
+            for (LayerRow* row : rows_) {
+                if (row->width() != w) row->resize(w, kRowHeight);
+            }
+            layoutWindow(false);
+        }
         // End-of-list drops: a drag over the stack's empty area (below the last
         // row) shows a caret under the last row and appends on drop.
         if (obj == stack_ && event->type() == QEvent::DragEnter) {
@@ -1171,41 +1281,125 @@ class LayersPanel final : public QWidget {
         return QWidget::eventFilter(obj, event);
     }
 
-    // The LayerRow widget for a document layer index, or null when the index
-    // is out of range (rows mirror d->layers order 1:1).
+    // The LayerRow widget currently bound to a document layer index, or
+    // null when the index is off-screen (the pool only covers the visible
+    // window, so off-screen rows have no widget by design).
     QWidget* rowWidget(int index) const {
-        if (index < 0 || index >= rows_.size()) return nullptr;
-        return rows_.at(index);
+        for (LayerRow* row : rows_) {
+            if (row->layerIndex() == index) return row;
+        }
+        return nullptr;
+    }
+
+    // Position of a layer in the visible order, or -1 when hidden/unknown.
+    int orderPos(int index) const {
+        for (int p = 0; p < order_.size(); ++p) {
+            if (order_[p] == index) return p;
+        }
+        return -1;
+    }
+
+    // Pool size for the current viewport: visible rows plus overscan above
+    // and below so normal scrolling rebinds without creating widgets.
+    // A small floor keeps tiny panels (and tests) on the single-pass path.
+    int poolNeeded() const {
+        const int vh = scroll_ && scroll_->viewport()
+                           ? scroll_->viewport()->height()
+                           : 0;
+        const int vis = vh > 0 ? vh / kRowHeight + 1 : 64;
+        return vis + 2 * kWindowOver;
+    }
+
+    void ensurePool(int need) {
+        while (rows_.size() < need) {
+            rows_.append(new LayerRow(state_, -1, &drop_, stack_, &rows_));
+        }
+    }
+
+    // Bind the pool to the window around the scroll position. Absolute
+    // y positions keep drag/drop, rename and paint code untouched: a pooled
+    // row is indistinguishable from a dedicated one.
+    void layoutWindow(bool force) {
+        DocumentItem* d = state_->activeDocument();
+        if (!d || order_.isEmpty()) return;
+        const int vy = scroll_ ? scroll_->verticalScrollBar()->value() : 0;
+        const int w = stack_->width();
+        ensurePool(poolNeeded());
+        const int maxBase = order_.size() <= rows_.size()
+                                ? 0
+                                : order_.size() - rows_.size();
+        const int want =
+            qBound(0, vy / kRowHeight - kWindowOver, maxBase);
+        if (!force && want == base_) return;
+        base_ = want;
+        stack_->setUpdatesEnabled(false);
+        for (int s = 0; s < rows_.size(); ++s) {
+            LayerRow* row = rows_[s];
+            const int pos = base_ + s;
+            if (pos >= order_.size()) {
+                row->hide();
+                continue;
+            }
+            row->setIndex(order_[pos]);
+            const int y = pos * kRowHeight;
+            if (row->y() != y || row->width() != w)
+                row->setGeometry(0, y, w, kRowHeight);
+            row->show();
+        }
+        stack_->setUpdatesEnabled(true);
     }
 
     void rebuild() {
-        while (stackLayout_->count() > 1) {
-            QLayoutItem* item = stackLayout_->takeAt(0);
-            if (QWidget* w = item->widget()) {
-                w->hide();  // deleteLater is deferred; an unhidden orphan keeps painting
-                w->deleteLater();
-            }
-            delete item;
-        }
         clearDropCaret();
         DocumentItem* d = state_->activeDocument();
+        // Rows are positioned manually (see below), never in the stack
+        // layout: a QBoxLayout with tens of thousands of items spends
+        // minutes in geometry passes (maximumSize/sizeHint per item, per
+        // pass) on a real display. The layout keeps only its stretch.
         if (!d) {
-            rows_.clear();
+            for (LayerRow* row : rows_) row->hide();
+            stack_->setMinimumHeight(kEndSlack);
+            order_.clear();
+            base_ = -1;
             lastDoc_ = nullptr;
             lastActive_ = -1;
             return;
         }
 
-        rows_.clear();
-        for (int i = 0; i < d->layers.size(); ++i) {
-            auto* row = new LayerRow(state_, i, &drop_, stack_);
-            rows_.append(row);
-            stackLayout_->insertWidget(i, row);
-            // A collapsed group hides its subtree rows (standard editors):
-            // only the group row stays visible. Hidden widgets take no layout
-            // space, so the panel reads as exactly the visible stack.
-            row->setVisible(!d->rowHiddenByCollapsedGroup(i));
+        const auto rbT0 = std::chrono::steady_clock::now();
+        // Row pool covers the visible window, not the whole stack: creating
+        // one QWidget per layer costs ~60us each (5s+ on an 84k-layer map),
+        // while only a few dozen rows are ever on screen. The visible order
+        // (collapsed subtrees excluded, like before) sets the scrollbar
+        // range; pooled rows bind to its window and carry absolute y
+        // positions, so drag, rename and paint code is untouched.
+        const int n = d->layers.size();
+        order_.clear();
+        order_.reserve(n);
+        for (int i = 0; i < n; ++i) {
+            if (!d->rowHiddenByCollapsedGroup(i)) order_.append(i);
         }
+        int removed = 0, created = 0;
+        const int poolWant = qMin(order_.size(), poolNeeded());
+        while (rows_.size() > poolWant && rows_.size() > 64) {
+            LayerRow* row = rows_.takeLast();
+            row->hide();
+            row->deleteLater();
+            ++removed;
+        }
+        const int poolHave = rows_.size();
+        ensurePool(poolWant);
+        created = rows_.size() - poolHave;
+        // Slack below the last row keeps the end-of-list drop zone.
+        stack_->setMinimumHeight(order_.size() * kRowHeight + kEndSlack);
+        base_ = -1;
+        layoutWindow(true);
+        ::pittore::core::log::log_info(
+            "[panel][rows] total=%d created=%d removed=%d pool=%d ms=%.2f",
+            n, created, removed, rows_.size(),
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - rbT0)
+                .count());
 
         if (LayerItem* l = state_->activeLayer()) {
             QSignalBlocker b1(opacity_), b2(fill_), b3(blendMode_);
@@ -1230,9 +1424,7 @@ class LayersPanel final : public QWidget {
             if (d != lastDoc_ || active != lastActive_) {
                 lastDoc_ = d;
                 lastActive_ = active;
-                if (active >= 0 && active < rows_.size())
-                    if (QWidget* w = rows_.at(active))
-                        scroll_->ensureWidgetVisible(w, 0, 40);
+                scrollToLayer(active);
             }
         } else {
             lastDoc_ = d;
@@ -1249,7 +1441,9 @@ class LayersPanel final : public QWidget {
     QScrollArea* scroll_ = nullptr;
     QWidget* stack_ = nullptr;
     QVBoxLayout* stackLayout_ = nullptr;
-    QVector<LayerRow*> rows_;    // live rows, for thumbnail refresh
+    QVector<LayerRow*> rows_;    // pooled rows for the visible window
+    QVector<int> order_;        // visible layer indices in stack order
+    int base_ = -1;             // order_ position bound to rows_[0]
     LayerDropState drop_;        // live drag-over caret shared with the rows
     QComboBox* blendMode_ = nullptr;
     QSpinBox* opacity_ = nullptr;

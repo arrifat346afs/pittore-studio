@@ -353,8 +353,8 @@ static void test_stashed_pixels() {
             for (const auto& el : dec->layers) {
                 if (el.name != "packed") continue;
                 sawLayer = true;
-                CHECK_EQ(el.rgba.size(), expect.size());
-                if (el.rgba.size() == expect.size())
+                CHECK_EQ(static_cast<long long>(el.rgba.size()), expect.size());
+                if (static_cast<long long>(el.rgba.size()) == expect.size())
                     CHECK_EQ(int(el.rgba[5]), int(static_cast<uchar>(expect[5])) * 257);
             }
         }

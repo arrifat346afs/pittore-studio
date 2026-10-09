@@ -117,6 +117,11 @@ ninja -C build
 ./build/src/app/painter
 ```
 
+Cap parallel jobs by available RAM: the test tree compiles app_state.cpp
+(~1GB per TU) into every test binary, so core-count ninja OOMs — e.g.
+`ninja -C build -j4`. (`just build` sizes `-j` from MemAvailable
+automatically; `PITTORE_JOBS` overrides.)
+
 ## Meson options
 
 | Option | Default | What it does |

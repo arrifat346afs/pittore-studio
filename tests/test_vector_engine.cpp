@@ -94,32 +94,34 @@ int main() {
         RgbaImage img{4, 4, std::vector<std::uint8_t>(64, 128)};
         FilterGraph g;
         g.id = "f";
-        g.prims.push_back(FePrimitive{"feGaussianBlur", {{"stdDeviation", "1"}}, "", ""});
+        g.prims.push_back(FePrimitive{"feGaussianBlur", {{"stdDeviation", "1"}}, "", "", ""});
         auto out = applyFilterGraph(g, img);
         assert(out.px.size() == 64);
         assert(!filterGraphToSvg(g).empty());
         assert(svgFilterCatalog().size() >= 16);
         // Full primitive coverage behaves sanely.
-        auto run1 = [&](FePrimitive p) {
+        // [[maybe_unused]]: the uses below are assert()s, compiled out in
+        // release (NDEBUG) builds, where the lambda would otherwise warn.
+        [[maybe_unused]] auto run1 = [&](FePrimitive p) {
             FilterGraph h;
             h.id = "t";
             h.prims.push_back(std::move(p));
             return applyFilterGraph(h, img);
         };
         // Identity-ish primitives preserve size.
-        assert(run1({"feMorphology", {{"operator", "erode"}, {"radius", "1"}}, "", ""}).px.size() == 64);
-        assert(run1({"feConvolveMatrix", {{"order", "3"}}, "", ""}).px.size() == 64);
-        assert(run1({"feDisplacementMap", {{"scale", "0"}, {"in2", "SourceGraphic"}}, "", ""}).px == img.px);
-        assert(run1({"feColorMatrix", {{"type", "matrix"}, {"values", "1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 1 0"}}, "", ""}).px == img.px);
-        assert(run1({"feColorMatrix", {{"type", "hueRotate"}, {"values", "0"}}, "", ""}).px == img.px);
-        assert(run1({"feColorMatrix", {{"type", "luminanceToAlpha"}}, "", ""}).px.size() == 64);
-        assert(run1({"feComponentTransfer", {}, "", ""}).px == img.px);
-        assert(run1({"feComposite", {{"operator", "arithmetic"}, {"k2", "1"}, {"in2", "SourceGraphic"}}, "", ""}).px == img.px);
-        assert(run1({"feMerge", {}, "", ""}).px.size() == 64);
-        assert(run1({"feTile", {}, "", ""}).px == img.px);
-        assert(run1({"feDiffuseLighting", {{"surfaceScale", "1"}}, "", ""}).px.size() == 64);
-        assert(run1({"feSpecularLighting", {{"surfaceScale", "1"}}, "", ""}).px.size() == 64);
-        assert(run1({"feDropShadow", {{"dx", "1"}, {"dy", "1"}, {"stdDeviation", "1"}}, "", ""}).px.size() == 64);
+        assert(run1({"feMorphology", {{"operator", "erode"}, {"radius", "1"}}, "", "", ""}).px.size() == 64);
+        assert(run1({"feConvolveMatrix", {{"order", "3"}}, "", "", ""}).px.size() == 64);
+        assert(run1({"feDisplacementMap", {{"scale", "0"}, {"in2", "SourceGraphic"}}, "", "", ""}).px == img.px);
+        assert(run1({"feColorMatrix", {{"type", "matrix"}, {"values", "1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 1 0"}}, "", "", ""}).px == img.px);
+        assert(run1({"feColorMatrix", {{"type", "hueRotate"}, {"values", "0"}}, "", "", ""}).px == img.px);
+        assert(run1({"feColorMatrix", {{"type", "luminanceToAlpha"}}, "", "", ""}).px.size() == 64);
+        assert(run1({"feComponentTransfer", {}, "", "", ""}).px == img.px);
+        assert(run1({"feComposite", {{"operator", "arithmetic"}, {"k2", "1"}, {"in2", "SourceGraphic"}}, "", "", ""}).px == img.px);
+        assert(run1({"feMerge", {}, "", "", ""}).px.size() == 64);
+        assert(run1({"feTile", {}, "", "", ""}).px == img.px);
+        assert(run1({"feDiffuseLighting", {{"surfaceScale", "1"}}, "", "", ""}).px.size() == 64);
+        assert(run1({"feSpecularLighting", {{"surfaceScale", "1"}}, "", "", ""}).px.size() == 64);
+        assert(run1({"feDropShadow", {{"dx", "1"}, {"dy", "1"}, {"stdDeviation", "1"}}, "", "", ""}).px.size() == 64);
         // Folded children round-trip through SVG.
         FilterGraph fg;
         fg.id = "fx";
@@ -127,18 +129,18 @@ int main() {
                                        {{"light.tag", "feDistantLight"},
                                         {"light.azimuth", "30"}},
                                        "lit",
-                                       "SourceGraphic"});
+                                       "SourceGraphic", ""});
         std::string svg = filterGraphToSvg(fg);
         assert(svg.find("feDistantLight") != std::string::npos);
         assert(svg.find("result=\"lit\"") != std::string::npos);
     }
     // Snap + grids.
     {
-        auto res = snapPoint(9.6, 0, gridCandidates(9.6, 0, 10.0), 1.0, SnapAll);
+        [[maybe_unused]] auto res = snapPoint(9.6, 0, gridCandidates(9.6, 0, 10.0), 1.0, SnapAll);
         assert(res.snapped);
-        GridSpec ax = axonometricFromRatio(2, 1, 10);
+        [[maybe_unused]] GridSpec ax = axonometricFromRatio(2, 1, 10);
         assert(ax.kind == GridKind::Axonometric);
-        auto [sx, sy] = snapToGrid(GridSpec{}, 12, 13);
+        [[maybe_unused]] auto [sx, sy] = snapToGrid(GridSpec{}, 12, 13);
         assert(sx == 10 && sy == 10);
     }
     // Align/distribute/arrange/transform.
@@ -187,7 +189,7 @@ int main() {
         auto maze = routeConnector({0, 0}, {10, 0}, ConnectorKind::Orthogonal, {wall});
         assert(maze.points.size() >= 2);
         for (auto [x, y] : maze.points) {
-            bool strictlyInside = x > 3.5 && x < 6.5 && y > -19 && y < 19;
+            [[maybe_unused]] bool strictlyInside = x > 3.5 && x < 6.5 && y > -19 && y < 19;
             assert(!strictlyInside);
         }
     }
@@ -203,7 +205,7 @@ int main() {
             for (int x = 5; x < 15; x++) block[(size_t)(y * 20 + x)] = 1.0f;
         auto fitted = traceBitmap(block, 20, 20, TraceSpec{});
         assert(!fitted.empty());
-        bool hasCubic = false;
+        [[maybe_unused]] bool hasCubic = false;
         for (auto& segs : fitted)
             for (auto& s : segs)
                 if (s.kind == Segment::Kind::CubicTo) hasCubic = true;
@@ -270,7 +272,7 @@ int main() {
     // LPE registry: all 55+ keys construct.
     {
         assert(lpe::allEffects().size() >= 55);
-        int built = 0;
+        [[maybe_unused]] int built = 0;
         for (auto& info : lpe::allEffects()) {
             lpe::Params p;
             if (lpe::makeEffect(info.type, p)) built++;
@@ -287,7 +289,7 @@ int main() {
                                   Segment{Segment::Kind::Close}};
         assert(!stack.apply(rect).empty());
         // Convert family produces genuine geometry (not passthrough).
-        auto applyKey = [&](const char* key, lpe::Params pp) {
+        [[maybe_unused]] auto applyKey = [&](const char* key, lpe::Params pp) {
             auto e = lpe::makeEffectByKey(key, pp);
             assert(e);
             return e->apply(rect);
@@ -399,7 +401,7 @@ int main() {
         el.node.paint.clipId = "c1";
         el.node.paint.filter.id = "f1";
         el.node.paint.filter.prims.push_back(
-            FePrimitive{"feGaussianBlur", {{"stdDeviation", "2"}}, "", ""});
+            FePrimitive{"feGaussianBlur", {{"stdDeviation", "2"}}, "", "", ""});
         el.node.paint.hasFilter = true;
         MeshGradient mesh;
         mesh.rows = mesh.cols = 1;

@@ -35,6 +35,13 @@
 using namespace pittore::ui;
 
 int main(int argc, char** argv) {
+    // Hermetic: the Enhance Edges check must exercise the classical fallback,
+    // not the developer's multi-GB model cache (see test_refine_dialog).
+    const QString noModels =
+        QDir::tempPath() + QStringLiteral("/pittore-test-no-models-chrome");
+    QDir(noModels).removeRecursively();
+    QDir().mkpath(noModels);
+    qputenv("PITTORE_MODELS_DIR", noModels.toLocal8Bit());
     QApplication app(argc, argv);
     const QString logDir =
         QDir::tempPath() + QStringLiteral("/pittore-chrome-log");
@@ -162,8 +169,9 @@ int main(int argc, char** argv) {
                 for (QToolButton* w : panel->findChildren<QToolButton*>())
                     checkWidget(w);
                 CHECK(!seen.isEmpty());
-                std::printf("  popup controls=%d size=%dx%d\n",
-                            seen.size(), bounds.width(), bounds.height());
+                std::printf("  popup controls=%lld size=%dx%d\n",
+                            static_cast<long long>(seen.size()),
+                            bounds.width(), bounds.height());
                 panel->grab().save(QDir::tempPath() + "/brush_popup.png");
                 // Gallery cells: items snap to the fixed grid pitch
                 // (uniform columns), names fully visible, none clipped.
@@ -182,8 +190,8 @@ int main(int argc, char** argv) {
                     CHECK(cells == gal->count());
                     // One x per grid column: 3 columns ⇒ ≤3 distinct lefts.
                     CHECK(cols.size() <= 3);
-                    std::printf("  gallery cells=%d cols=%d\n", cells,
-                                cols.size());
+                    std::printf("  gallery cells=%d cols=%lld\n", cells,
+                                static_cast<long long>(cols.size()));
                 }
             }
         }

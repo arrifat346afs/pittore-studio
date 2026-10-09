@@ -3,6 +3,7 @@
 #include <QHash>
 #include <QImage>
 #include <QObject>
+#include <QPainterPath>
 #include <QPointF>
 #include <QRect>
 #include <QRectF>
@@ -293,6 +294,31 @@ struct LayerItem {
     // rebake is only reused while it still covers the viewport, so panning
     // past it schedules a fresh bake instead of showing stale tiles.
     mutable QRectF styledView;
+    // Cached doc-space geometry footprint behind the last zoom-density
+    // decision (single-art bake or flattened-row union box, WITHOUT the
+    // stroke margin the bake framing adds). Lets the zoom-settle sweep
+    // predict the density bucket without walking any QPainterPath: when the
+    // stamp + placement key still matches, an unchanged bucket skips both
+    // the geometry walk and the re-rasterize. Pinned by
+    // styledFootprintStamp (sourceStamp for single-art rows, flatStamp for
+    // flattened rows); the two row kinds never share a layer, and each
+    // rebake path additionally requires its own geometry present, so a
+    // stale box from the other kind can never validate.
+    mutable QRectF styledFootprint;
+    mutable std::uint64_t styledFootprintStamp = 0;
+
+    // Cached live-draw paths for the canvas: the QPainterPath built from
+    // QPainterPath built from `art` plus the variable-width stroke outline.
+    // Geometry is immutable per ArtNode, so the cache keys on the node
+    // pointer + sourceStamp (bumped by every art replacement, so a recycled
+    // address can never validate stale geometry; undo snapshots share the
+    // same node pointer and stamp, which validate correctly). Implicitly
+    // shared: snapshots copy it for free. GUI-thread only, like `thumbnail`.
+    mutable QPainterPath livePathCache;
+    mutable QPainterPath liveStrokeCache;
+    mutable bool liveStrokeBuilt = false;
+    mutable const void* livePathKey = nullptr;
+    mutable std::uint64_t livePathStamp = 0;
 
     // Cached Layers-panel preview (see layerThumbnail). Empty until the panel
     // first asks for it; the model clears it whenever the layer's pixel content
@@ -419,8 +445,14 @@ struct CompositedLayer {
 // +A<kind> live adjustment. Built per rebuild (O(layers), trivial) and
 // printed only by the gated breakdown logs.
 inline QString describeStack(const std::vector<CompositedLayer>& gathered) {
+    // Capped: an 84k-layer stack dumps half a megabyte per slow rebuild.
+    // Head + tail keeps attribution (top/bottom layers matter) while the
+    // count preserves scale.
+    constexpr std::size_t kCap = 12;
     QString out = QLatin1String("[");
-    for (std::size_t i = 0; i < gathered.size(); ++i) {
+    const std::size_t n = gathered.size();
+    const std::size_t head = std::min(n, kCap);
+    for (std::size_t i = 0; i < head; ++i) {
         if (i) out += QLatin1Char(',');
         const CompositedLayer& e = gathered[i];
         if (e.isAdjustment)
@@ -430,6 +462,8 @@ inline QString describeStack(const std::vector<CompositedLayer>& gathered) {
         if (e.mask) out += QLatin1Char('M');
         if (e.clipped) out += QLatin1Char('C');
     }
+    if (n > head)
+        out += QStringLiteral("...(%1 more)").arg(n - head);
     out += QLatin1Char(']');
     return out;
 }
@@ -667,6 +701,21 @@ class DocumentItem {
     // Drop device slots whose pixel/mask Images are no longer owned by any
     // layer. Called after a full rebuild.
     void prunePlacedSources();
+    // Device composite moved out to composite_gpu.cpp. Returns false when a
+    // device failure (OOM included) should fall through to the CPU path.
+    // Takes the stage buffers by reference so the stage type itself stays
+    // local to app_state.cpp.
+    bool rebuildCompositeGPU(pittore::compute::ComputeBackend& be,
+                             pittore::compute::Buffer& acc,
+                             std::vector<std::unique_ptr<pittore::compute::Buffer>>&
+                                 toneScratch,
+                             std::uint32_t w, std::uint32_t h, bool toneActive);
+    // Region twin of the above, moved out to composite_gpu.cpp for the same
+    // guard. Region rect is passed through for attribution logging.
+    bool renderRegionGPU(pittore::compute::ComputeBackend& be,
+                         pittore::compute::Buffer& acc, int x0, int y0, int x1,
+                         int y1, std::uint32_t w, std::uint32_t h,
+                         const QRect& region);
     // Incremental device refresh after an in-place brush dab: copies only
     // `layerRect` (layer-native pixels of the draw source) into the staged
     // slot and pushes just that region to the device. Direct path only —

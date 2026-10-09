@@ -908,10 +908,21 @@ bool AppState::placeSvgParts(const QString& path, const SvgImportResult& svg,
     }
 
     // `incoming` is panel order (index 0 = top); inserting it at `at` bottom-
-    // first keeps the SVG's own paint order with the top part on top.
+    // first keeps the SVG's own paint order with the top part on top. One
+    // splice, not N inserts: repeated insert() shifts the tail every time
+    // (O(n*m) moves - minutes for an 80k-part drop), while three linear
+    // passes land the identical order.
     d->beginUndoAction();
-    for (int i = incoming.size() - 1; i >= 0; --i)
-        d->layers.insert(at, std::move(incoming[i]));
+    {
+        QVector<LayerItem> merged;
+        merged.reserve(d->layers.size() + incoming.size());
+        for (int i = 0; i < at; ++i)
+            merged.append(std::move(d->layers[i]));
+        for (LayerItem& li : incoming) merged.append(std::move(li));
+        for (int i = at; i < d->layers.size(); ++i)
+            merged.append(std::move(d->layers[i]));
+        d->layers = std::move(merged);
+    }
     d->activeLayer = at;
     d->selectedLayers.clear();
     d->selectedLayers.push_back(at);

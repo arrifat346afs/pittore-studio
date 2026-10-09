@@ -8,6 +8,14 @@ if has_qt6
     dependencies : [pittore_ui_dep, pittore_compute_dep, qt6dep],
     include_directories : src_inc,
     install : true)
+  # MCP stdio shim for AI clients driving the live session (no GUI here;
+  # it forwards over the app's local-socket bridge). Installed so clients
+  # can find it on PATH.
+  executable('pittore-mcp',
+    files('mcp_main.cpp'),
+    dependencies : [pittore_ui_dep, pittore_compute_dep, qt6dep],
+    include_directories : src_inc,
+    install : true)
   install_data('../../packaging/linux/studio.pittore.painter.desktop',
     install_dir : get_option('datadir') / 'applications')
   install_data('../../packaging/linux/studio.pittore.painter.metainfo.xml',

@@ -22,9 +22,18 @@ ninja -C build && meson test -C build --print-errorlogs   # same, without just
 meson test -C build <name> --print-errorlogs # single test
 ```
 
+Build parallelism is RAM-capped: `just` sizes ninja `-j` from MemAvailable
+because app_state.cpp (~1GB per TU) compiles into ~60 test binaries — bare
+core-count ninja OOMs this tree. `PITTORE_JOBS=N` overrides the cap.
+
 Optional: `just models` downloads AI models (multi-GB, never bundle them). `just install` installs system-wide.
 
 Meson options: `backend-cuda`, `backend-hip`, `cuda-root`, `hip-root`, `onnxruntime`, `onnxruntime-root`, `app`. Backends and ONNX Runtime are auto-detected. Do not make the build depend on a GPU toolchain being present.
+
+## Diagnostics
+
+- Runtime logs: `~/.config/PittoreStudio/log/` (`Pittore-UX.log`, `Pittore-Render.log`, `Pittore-GPU.log`, `Pittore-Tools.log`, `Pittore-Crash.log`).
+- SVG imports report one `[import] SVG ...` line with leaf counts, geometry MB, raster area, layer count, document size, and `verdict=ok|degraded|failed`. Degraded paths log their own warning.
 
 ## Layout
 

@@ -74,7 +74,6 @@ std::vector<Segment> bsplineFit(const std::vector<std::pair<double, double>>& pt
         double b0y = (p0.second + 4 * p1.second + p2.second) / 6.0;
         double b1x = (4 * p1.first + 2 * p2.first) / 6.0 - p0.first / 6.0 + p1.first * 0;
         (void)c1x;
-        double c1bx = (2 * p1.first + p2.first) / 3.0 - p0.first / 6.0 + p0.first * 0;
         // Recompute cleanly with the textbook matrix:
         double q0x = (p0.first + 4 * p1.first + p2.first) / 6.0;
         double q0y = (p0.second + 4 * p1.second + p2.second) / 6.0;

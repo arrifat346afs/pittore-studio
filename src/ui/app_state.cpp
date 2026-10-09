@@ -115,14 +115,6 @@ std::unique_ptr<pittore::compute::ComputeBackend> makeBackendFor(
     return pittore::compute::make_backend(pittore::compute::BackendType::CPU);
 }
 
-// Full 27-mode + Pass Through mapping (blend.h owns the names it understands).
-// "Add" is the imported display name for Linear Dodge (Add) — the one name
-// that differs from the engine's; everything else round-trips as-is.
-pittore::compute::BlendMode engineBlendMode(const QString& name) {
-    if (name == QStringLiteral("Add")) return pittore::compute::BlendMode::LinearDodge;
-    return pittore::compute::blend::from_display_name(name.toUtf8().constData());
-}
-
 std::size_t layerBytes(const QSize& size) {
     return static_cast<std::size_t>(size.width()) * size.height() * sizeof(pittore::RGBAf);
 }
@@ -199,6 +191,16 @@ std::shared_ptr<pittore::Image> imageFromQImage(const QImage& in) {
 }
 
 }  // namespace
+
+// Full 27-mode + Pass Through mapping (blend.h owns the names it understands).
+// "Add" is the imported display name for Linear Dodge (Add) — the one name
+// that differs from the engine's; everything else round-trips as-is.
+// Namespace scope (declared in app_state_detail.h) so the split-out
+// composite TU can call it.
+pittore::compute::BlendMode engineBlendMode(const QString& name) {
+    if (name == QStringLiteral("Add")) return pittore::compute::BlendMode::LinearDodge;
+    return pittore::compute::blend::from_display_name(name.toUtf8().constData());
+}
 
 // History source lookup shared by the History and Art History Brushes:
 // the oldest undo snapshot's matching layer (document-open state).
@@ -651,6 +653,12 @@ QImage groupThumbnail(const DocumentItem& d, int groupIndex, int box) {
                                         d.layers[groupIndex].name.toUtf8().constData());
         return QImage();
     }
+    // Combined previews stop scaling: past a few thousand descendants the
+    // box resamples oversampling noise at O(box² × ops) CPU (tens of
+    // millions of samples for an 80k-leaf import), so huge groups keep the
+    // folder glyph exactly like empty ones do.
+    constexpr int kMaxGroupThumbOps = 2048;
+    if (ops.size() > kMaxGroupThumbOps) return QImage();
     const LayerItem& grp = d.layers[groupIndex];
     if (grp.groupThumbnailStamp == stamp && !grp.groupThumbnailCache.isNull() &&
         grp.groupThumbnailCache.width() == box)
@@ -725,8 +733,22 @@ QImage groupThumbnail(const DocumentItem& d, int groupIndex, int box) {
         const double soy = c.offset.y() * k + oy;
         const double ssx = c.scaleX * k;
         const double ssy = c.scaleY * k;
-        for (int ty = 0; ty < box; ++ty) {
-            for (int tx = 0; tx < box; ++tx) {
+        // Tighten the pixel loop to the member's own footprint: a map glyph
+        // covering one preview pixel must not pay a full-box scan. Same
+        // samples in the same order, so the bytes are unchanged.
+        const double fx0 = sox, fx1 = sox + sw * ssx;
+        const double fy0 = soy, fy1 = soy + sh * ssy;
+        int tx0 = static_cast<int>(std::floor(std::min(fx0, fx1) - 1.0));
+        int tx1 = static_cast<int>(std::ceil(std::max(fx0, fx1) + 1.0));
+        int ty0 = static_cast<int>(std::floor(std::min(fy0, fy1) - 1.0));
+        int ty1 = static_cast<int>(std::ceil(std::max(fy0, fy1) + 1.0));
+        if (tx0 < 0) tx0 = 0;
+        if (ty0 < 0) ty0 = 0;
+        if (tx1 > box) tx1 = box;
+        if (ty1 > box) ty1 = box;
+        if (tx0 >= tx1 || ty0 >= ty1) continue;
+        for (int ty = ty0; ty < ty1; ++ty) {
+            for (int tx = tx0; tx < tx1; ++tx) {
                 const pittore::RGBAf s =
                     thumbSample(RealizedView{src}, sw, sh, tx + 0.5, ty + 0.5,
                                 sox, soy, ssx, ssy);
@@ -973,9 +995,13 @@ const pittore::compute::Buffer& DocumentItem::placedSourceFor(const LayerItem& l
     if (key && s.img) std::memcpy(dev->host(), s.img->data(), nbytes);
     // Buffers are created zeroed; push the current pixels (no-op on CPU).
     dev->upload();
-    ::pittore::core::log::log_info(
-        "[render][placed] source cached key=%p bytes=%zu backend=%s", key,
-        nbytes, be.name().c_str());
+    // Cache fills are per-layer traffic on thousand-layer documents (one
+    // line per layer per cold composite); only an explicit trace pays for
+    // it. The refresh path just above is already gated the same way.
+    if (pittore::core::log::strokeTrace())
+        ::pittore::core::log::log_info(
+            "[render][placed] source cached key=%p bytes=%zu backend=%s", key,
+            nbytes, be.name().c_str());
     auto ins = stage_->sources.emplace(
         key, PaintStage::PlacedSource{key, l.sourceStamp, l.styledRev, nbytes,
                                       std::move(dev)});
@@ -1473,8 +1499,6 @@ void DocumentItem::rebuildComposite() {
     // folded into its alpha before the blend. Text / Shape / Adjustment layers
     // remain QPainter stand-ins drawn above the flattened pixels.
     ensurePainter();
-    pittore::compute::ComputeBackend& be =
-        backend ? *backend : cpuBackend();
     const bool gpu =
         backend && backend->type() != pittore::compute::BackendType::CPU;
 
@@ -1483,198 +1507,12 @@ void DocumentItem::rebuildComposite() {
     // background included, since the sampler reads an integer-aligned texel
     // exactly — then hand the finished frame to the canvas with one device
     // convert + DMA. No host resample, no work buffer, no per-layer transfer.
-    if (gpu) {
-        be.clear(*stage_->acc);
-        const auto tclear = std::chrono::steady_clock::now();
-        // Gather every visible pixel layer's device source + clipped footprint,
-        // then composite them ALL with one batched launch: a canvas holding
-        // thousands of small parts must not launch thousands of kernels.
-        std::vector<CompositedLayer> gathered;
-        gatherCompositedLayers(QRect(QPoint(0, 0), size), gathered);
-        std::vector<pittore::compute::PlacedLayer> placed;
-        placed.reserve(gathered.size());
-        for (const CompositedLayer& e : gathered) {
-            const LayerItem& l = layers[e.layerIndex];
-            pittore::compute::PlacedLayer p;
-            if (e.isAdjustment) {
-                p.isAdjustment = true;
-                p.adjKind = e.adjKind;
-                for (int k = 0; k < 16; ++k) p.adjP[k] = e.adjP[k];
-                p.adjAux = adjAuxSourceFor(l);
-            } else {
-                p.src = &placedSourceFor(l);
-                p.sw = e.source.img->width();
-                p.sh = e.source.img->height();
-                p.ox = e.source.offset.x();
-                p.oy = e.source.offset.y();
-                p.sx = e.source.scaleX;
-                p.sy = e.source.scaleY;
-            }
-            const pittore::compute::Buffer* maskBuf = maskSourceFor(l);
-            p.mask = maskBuf;
-            p.msw = e.mask ? static_cast<std::uint32_t>(e.mask->width()) : 0u;
-            p.msh = e.mask ? static_cast<std::uint32_t>(e.mask->height()) : 0u;
-            p.mox = e.maskOffset.x();
-            p.moy = e.maskOffset.y();
-            p.msx = e.maskScaleX;
-            p.msy = e.maskScaleY;
-            p.x0 = static_cast<std::uint32_t>(e.window.left());
-            p.y0 = static_cast<std::uint32_t>(e.window.top());
-            p.x1 = static_cast<std::uint32_t>(e.window.right() + 1);
-            p.y1 = static_cast<std::uint32_t>(e.window.bottom() + 1);
-            p.fold = e.fold;
-            p.mode = engineBlendMode(e.blendMode);
-            p.clipped = e.clipped;
-            p.clipBase = e.clipBase;
-            placed.push_back(p);
-        }
-        if (!toneActive) {
-            if (!placed.empty()) be.composite_many_into(*stage_->acc, w, 0, 0, w,
-                                                        h, placed.data(),
-                                                        placed.size());
-        } else {
-            // Segmented composite: tone-blend spans composite their children
-            // in isolation (temp buffer), blend against a snapshot of the
-            // accumulator below them, and re-enter as one synthetic layer.
-            // Clip bases index the gathered list, so slices remap them to
-            // slice-relative positions (out-of-slice bases degrade to
-            // unclipped, mirroring composite_many_host's own validation —
-            // and cross-group clip pairs can never be valid, see
-            // gatherCompositedLayers).
-            auto remapPlaced = [&](std::size_t glo, std::size_t ghi) {
-                std::vector<pittore::compute::PlacedLayer> slice;
-                if (ghi > glo) slice.reserve(ghi - glo);
-                for (std::size_t j = glo; j < ghi && j < placed.size(); ++j) {
-                    auto p = placed[j];
-                    if (p.clipped && p.clipBase >= 0) {
-                        if (static_cast<std::size_t>(p.clipBase) >= glo &&
-                            static_cast<std::size_t>(p.clipBase) < ghi)
-                            p.clipBase -= static_cast<int>(glo);
-                        else {
-                            p.clipped = false;
-                            p.clipBase = -1;
-                        }
-                    }
-                    slice.push_back(p);
-                }
-                return slice;
-            };
-            // Gathered-index subrange whose entries fall in a panel range
-            // (gather preserves panel order, so the slice is contiguous).
-            auto placedRangeForPanels = [&](int plo, int phi) {
-                std::size_t a = placed.size(), b = 0;
-                for (std::size_t j = 0; j < gathered.size() && j < placed.size();
-                     ++j) {
-                    const int li = gathered[j].layerIndex;
-                    if (li >= plo && li <= phi) {
-                        a = std::min(a, j);
-                        b = std::max(b, j + 1);
-                    }
-                }
-                if (b <= a) return std::pair<std::size_t, std::size_t>{0, 0};
-                return std::pair<std::size_t, std::size_t>{a, b};
-            };
-            std::function<void(pittore::compute::Buffer&, int, int, int)> compGPU =
-                [&](pittore::compute::Buffer& acc, int top, int bottom,
-                    int depth) {
-                    int g = -1, gend = -1;
-                    for (const ToneSpan& s : toneSpansIn(top, bottom)) {
-                        // Skip headers whose children contribute nothing.
-                        const auto cr =
-                            placedRangeForPanels(s.header + 1, s.end);
-                        if (cr.second <= cr.first) continue;
-                        if (s.header > g) {
-                            g = s.header;
-                            gend = s.end;
-                        }
-                    }
-                    if (g < 0) {
-                        const auto r = placedRangeForPanels(top, bottom);
-                        if (r.second <= r.first) return;
-                        auto slice = remapPlaced(r.first, r.second);
-                        if (!slice.empty())
-                            be.composite_many_into(acc, w, 0, 0, w, h,
-                                                   slice.data(), slice.size());
-                        return;
-                    }
-                    compGPU(acc, gend + 1, bottom, depth);  // everything below
-                    // Depth-indexed scratch pair for this level (never shared
-                    // with nested levels); grown lazily, persists in stage_.
-                    const std::size_t need = std::size_t(2 * (depth + 1));
-                    while (stage_->toneScratch.size() < need)
-                        stage_->toneScratch.push_back(
-                            be.make_buffer(static_cast<std::size_t>(w) * h *
-                                           sizeof(pittore::RGBAf)));
-                    pittore::compute::Buffer& grp =
-                        *stage_->toneScratch[std::size_t(2 * depth)];
-                    pittore::compute::Buffer& bdrop =
-                        *stage_->toneScratch[std::size_t(2 * depth + 1)];
-                    // Backdrop snapshot: device copy of the below-slice the
-                    // line above just composited into acc (was: a second
-                    // full composite of the same slice). Bit-identical,
-                    // one D2D instead of a second kernel over all layers.
-                    bdrop.copy_from(acc);
-                    be.clear(grp);
-                    compGPU(grp, g + 1, gend, depth + 1);  // children
-                    const LayerItem& header = layers[g];
-                    be.tone_blend(grp, bdrop, w, h, header.toneBlend);
-                    // The blended group re-enters as one Normal layer with
-                    // the header's own opacity/fill/mode (masks on group
-                    // headers are engine-wide no-ops, matching groups).
-                    pittore::compute::PlacedLayer synth;
-                    synth.src = &grp;
-                    synth.sw = w;
-                    synth.sh = h;
-                    synth.ox = 0.0;
-                    synth.oy = 0.0;
-                    synth.sx = 1.0;
-                    synth.sy = 1.0;
-                    synth.x0 = 0;
-                    synth.y0 = 0;
-                    synth.x1 = w;
-                    synth.y1 = h;
-                    synth.fold = (header.opacity / 100.0f) *
-                                 (header.fill / 100.0f);
-                    synth.mode = engineBlendMode(header.blendMode);
-                    be.composite_many_into(acc, w, 0, 0, w, h, &synth, 1);
-                    compGPU(acc, top, g - 1, depth);  // everything above
-                };
-            compGPU(*stage_->acc, 0, layers.size() - 1, 0);
-        }
-        const auto tplaced = std::chrono::steady_clock::now();
-        // Layers that went away leave orphaned device copies behind; prune
-        // them instead of dropping the whole cache, so unchanged layers keep
-        // their uploaded pixels and a rebuild never does 4101 fresh cudaMalloc
-        // + upload dances. placedSourceFor self-heals entries whose size or
-        // stamp changed, so matching the ownership pointer is enough.
-        prunePlacedSources();
-        const auto tprune = std::chrono::steady_clock::now();
-        be.blit_premul(*stage_->acc, composite.bits(), w, 0, 0, w, h,
-                       static_cast<std::size_t>(composite.bytesPerLine()));
-        const auto tblit = std::chrono::steady_clock::now();
-        drawVectorOverlays();
-        const double ms = std::chrono::duration<double, std::milli>(
-                              std::chrono::steady_clock::now() - t0)
-                              .count();
-        PITTORE_LOG("[render][rebuild] w=%u h=%u layers=%d backend=%s ms=%.2f",
-                     w, h, static_cast<int>(layers.size()),
-                     backend ? backend->name().c_str() : "cpu", ms);
-        // Breakdown only on demand: per-rebuild tracing doubles rebuild
-        // cost with mutex + file I/O. Slow rebuilds always report.
-        if (pittore::core::log::strokeTrace() ||
-            ms >= pittore::core::log::slowEventMs())
-            PITTORE_LOG(
-                "[render][rebuild-breakdown] clear=%.3f gather+placed=%.3f "
-                "prune=%.3f blit=%.3f overlay=%.3f stack=%s",
-                std::chrono::duration<double, std::milli>(tclear - t0).count(),
-                std::chrono::duration<double, std::milli>(tplaced - tclear).count(),
-                std::chrono::duration<double, std::milli>(tprune - tplaced).count(),
-                std::chrono::duration<double, std::milli>(tblit - tprune).count(),
-                std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - tblit).count(),
-                describeStack(gathered).toLocal8Bit().constData());
+    // Device failures (OOM included) fall through to the CPU reference
+    // path below instead of terminating: a huge import on a small GPU
+    // still opens.
+    if (gpu && rebuildCompositeGPU(*backend, *stage_->acc, stage_->toneScratch,
+                                   w, h, toneActive))
         return;
-    }
 
     // CPU reference path: host-authoritative accumulator. This uses the same
     // shared bottom→top row walk as the GPU batched kernel (masks, folds and
@@ -1894,7 +1732,6 @@ void DocumentItem::renderRegion(const QRect& region) {
     const auto t0 = std::chrono::steady_clock::now();
 
     ensurePainter();
-    pittore::compute::ComputeBackend& be = backend ? *backend : cpuBackend();
     const bool gpu =
         backend && backend->type() != pittore::compute::BackendType::CPU;
 
@@ -1903,92 +1740,11 @@ void DocumentItem::renderRegion(const QRect& region) {
     // touches the dirty rect (the 1:1 background included) with the fused
     // kernel, and hand just the dirty rows to the canvas with a device convert
     // + DMA. The host never resamples a photo and never stages the work buffer.
-    if (gpu) {
-        const auto tprep0 = std::chrono::steady_clock::now();
-        be.clear(*stage_->acc);
-        // A layer missing the dirty region (halo included) stages nothing —
-        // skipping it is exactly compositing transparency. This is what
-        // keeps multi-part documents interactive: a move touches the moved
-        // layer plus whatever sits under/over it, not the whole stack.
-        // Everything that DOES touch the region is composited with one
-        // batched launch, so the dirty-rect path never pays per-layer
-        // launch overhead either.
-        std::vector<CompositedLayer> gathered;
-        gatherCompositedLayers(QRect(x0, y0, x1 - x0, y1 - y0), gathered);
-        std::vector<pittore::compute::PlacedLayer> placed;
-        placed.reserve(gathered.size());
-        for (const CompositedLayer& e : gathered) {
-            const LayerItem& l = layers[e.layerIndex];
-            pittore::compute::PlacedLayer p;
-            if (e.isAdjustment) {
-                p.isAdjustment = true;
-                p.adjKind = e.adjKind;
-                for (int k = 0; k < 16; ++k) p.adjP[k] = e.adjP[k];
-                p.adjAux = adjAuxSourceFor(l);
-            } else {
-                p.src = &placedSourceFor(l);
-                p.sw = e.source.img->width();
-                p.sh = e.source.img->height();
-                p.ox = e.source.offset.x();
-                p.oy = e.source.offset.y();
-                p.sx = e.source.scaleX;
-                p.sy = e.source.scaleY;
-            }
-            const pittore::compute::Buffer* maskBuf = maskSourceFor(l);
-            p.mask = maskBuf;
-            p.msw = e.mask ? static_cast<std::uint32_t>(e.mask->width()) : 0u;
-            p.msh = e.mask ? static_cast<std::uint32_t>(e.mask->height()) : 0u;
-            p.mox = e.maskOffset.x();
-            p.moy = e.maskOffset.y();
-            p.msx = e.maskScaleX;
-            p.msy = e.maskScaleY;
-            p.x0 = static_cast<std::uint32_t>(e.window.left());
-            p.y0 = static_cast<std::uint32_t>(e.window.top());
-            p.x1 = static_cast<std::uint32_t>(e.window.right() + 1);
-            p.y1 = static_cast<std::uint32_t>(e.window.bottom() + 1);
-            p.fold = e.fold;
-            p.mode = engineBlendMode(e.blendMode);
-            p.clipped = e.clipped;
-            p.clipBase = e.clipBase;
-            placed.push_back(p);
-        }
-        if (!placed.empty())
-            be.composite_many_into(*stage_->acc, w,
-                                   static_cast<std::uint32_t>(x0),
-                                   static_cast<std::uint32_t>(y0),
-                                   static_cast<std::uint32_t>(x1),
-                                   static_cast<std::uint32_t>(y1),
-                                   placed.data(), placed.size());
-        uchar* dst = composite.bits() +
-                     static_cast<qsizetype>(y0) * composite.bytesPerLine() +
-                     static_cast<qsizetype>(x0) * 4;
-        // The launches above are async, so the work lands here: blit_premul
-        // waits on the stream when it DMAs the converted rows back.
-        const auto tprep1 = std::chrono::steady_clock::now();
-        be.blit_premul(*stage_->acc, dst, w, static_cast<std::uint32_t>(x0),
-                       static_cast<std::uint32_t>(y0),
-                       static_cast<std::uint32_t>(x1),
-                       static_cast<std::uint32_t>(y1),
-                       static_cast<std::size_t>(composite.bytesPerLine()));
-        const auto tblit1 = std::chrono::steady_clock::now();
-        drawVectorOverlays();
-        const double ms = std::chrono::duration<double, std::milli>(
-                              std::chrono::steady_clock::now() - t0)
-                              .count();
-        // Per-event log: gated like the dab logs, but slow regions always
-        // report with their prep/blit split so real slowness is attributable.
-        if (pittore::core::log::strokeTrace() ||
-            ms >= pittore::core::log::slowEventMs())
-            PITTORE_LOG(
-                "[render][region] incremental backend=%s region=(%d,%d,%d,%d) "
-                "layers=%d prep=%.2f blit=%.2f ms=%.2f",
-                backend ? backend->name().c_str() : "cpu", region.x(), region.y(),
-                region.width(), region.height(), static_cast<int>(layers.size()),
-                std::chrono::duration<double, std::milli>(tprep1 - tprep0).count(),
-                std::chrono::duration<double, std::milli>(tblit1 - tprep1).count(),
-                ms);
+    // Same guard as the full rebuild: device failure falls through to
+    // the CPU path below instead of terminating.
+    if (gpu && renderRegionGPU(*backend, *stage_->acc, x0, y0, x1, y1, w, h,
+                                region))
         return;
-    }
 
     // CPU reference path: host-authoritative accumulator. Like the full
     // rebuild, this walks the same shared bottom→top stack instead of

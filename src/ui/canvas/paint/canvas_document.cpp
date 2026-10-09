@@ -16,8 +16,10 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QPainterPath>
+#include <QPainterPathStroker>
 #include <QScrollBar>
 #include <QSet>
+#include <QString>
 #include <QDateTime>
 #include <QTimer>
 #include <QWheelEvent>
@@ -48,37 +50,22 @@
 
 #include "ui/canvas/shared/canvas_helpers.h"
 
+#include "ui/canvas/paint/canvas_display_mode.h"
+#include "ui/canvas/paint/canvas_crisp.h"
+#include "ui/canvas/paint/canvas_layer_cache.h"
+#include "ui/canvas/paint/canvas_tile_store.h"
+
 namespace pittore::ui {
 namespace {
 
-// RAII for one segmented paint: park visibility, restore it afterwards, then
-// rebuild once so staging buffers and every composite reader see the whole
-// document again (mirrors SoloGuard in window_helpers, but restores without
-// assuming which layers were soloed). The rebuild is skipped when no pixel
-// run painted (all-vector documents draw straight from geometry): the
-// composite is zoom-independent, so rebuilding it per zoom frame was pure
-// overhead behind the stutter.
-struct SegmentGuard {
-    DocumentItem* d;
-    QVector<char> visible;
-    bool painted = false;
-    explicit SegmentGuard(DocumentItem* doc) : d(doc) {
-        visible.reserve(d->layers.size());
-        for (const LayerItem& l : d->layers) visible.push_back(l.visible);
-    }
-    ~SegmentGuard() {
-        for (int i = 0; i < d->layers.size() && i < visible.size(); ++i)
-            d->layers[i].visible = static_cast<bool>(visible[i]);
-        if (painted) d->rebuildComposite();
-    }
-};
 
-// Blit the live composite exactly like the legacy path (full or damaged
+// Blit a composite source exactly like the legacy path (full or damaged
 // sub-rect), so segmented and legacy paints sample identically.
-void blitComposite(QPainter& p, const QTransform& t, DocumentItem* d,
+void blitComposite(QPainter& p, const QTransform& t, const QImage& src,
                    const QRectF& docRect, const QRect& viewDirty) {
+    if (src.isNull()) return;
     if (viewDirty.isEmpty()) {
-        p.drawImage(docRect, d->composite);
+        p.drawImage(docRect, src);
         return;
     }
     // Sample only the damaged source stretch so a region edit paints the
@@ -91,56 +78,119 @@ void blitComposite(QPainter& p, const QTransform& t, DocumentItem* d,
     const QRect docDirty =
         docDirtyF.isEmpty()
             ? QRect()
-            : docDirtyF.toAlignedRect().intersected(d->composite.rect());
+            : docDirtyF.toAlignedRect().intersected(src.rect());
     if (!docDirty.isEmpty())
-        p.drawImage(QRectF(docDirty), d->composite, docDirty);
+        p.drawImage(QRectF(docDirty), src, docDirty);
 }
 
-// Draw one art layer straight from geometry at view resolution. The painter
-// already carries the doc→view transform; prepend the node→doc placement
-// (established order: matrix, then scale, then offset).
-void paintVectorLayer(QPainter& p, const LayerItem& l) {
-    const pittore::vector::ArtNode& node = *l.art;
-    const double* m = node.matrix;
-    const QTransform nodeToDoc =
-        QTransform(m[0], m[1], m[2], m[3], m[4], m[5]) *
-        QTransform().scale(l.scaleX, l.scaleY) *
-        QTransform().translate(l.offset.x(), l.offset.y());
-    QPainterPath path = artNodePath(node);
-    if (!node.evenOdd) path.setFillRule(Qt::WindingFill);
-    p.save();
-    p.setTransform(nodeToDoc * p.transform(), false);
-    p.setOpacity(std::clamp(node.opacity, 0.0, 1.0));
-    const pittore::vector::ArtPaint& paint = node.paint;
-    if (paint.hasFill) {
-        p.setPen(Qt::NoPen);
-        p.setBrush(artFillBrush(node));
-        p.drawPath(path);
-    }
-    if (paint.hasStroke) {
-        // Variable-width strokes expand to filled outlines, like the
-        // rasterizer; uniform strokes keep the fast pen path.
-        const QPainterPath expanded = expandStrokePath(node);
-        if (!expanded.isEmpty()) {
-            p.setPen(Qt::NoPen);
-            p.setBrush(QColor(paint.stroke[0], paint.stroke[1],
-                              paint.stroke[2], paint.stroke[3]));
-            p.drawPath(expanded);
-        } else {
-            QPen pen(QColor(paint.stroke[0], paint.stroke[1], paint.stroke[2],
-                            paint.stroke[3]),
-                     std::max(0.01, paint.strokeWidth));
-            pen.setCosmetic(false);
-            pen.setCapStyle(artCapStyle(paint.cap));
-            pen.setJoinStyle(artJoinStyle(paint.join));
-            applyDashToPen(pen, paint);
-            p.setPen(pen);
-            p.setBrush(Qt::NoBrush);
-            p.drawPath(path);
+// Fully-opaque art for a crisp live draw: any translucency (fill,
+// gradient stop, stroke, node opacity), paint servers (patterns), markers,
+// clips/masks, meshes or filters means the layer keeps its correctly
+// blended composite raster instead. Mirrors the per-drawable checks the old
+// global solo gate applied, now decided per layer. Layer-level blend,
+// opacity, adjustment, clip, mask, style and filter state is already vetted
+// by vectorViewOrder before a layer can reach here.
+bool liveDrawOpaque(const LayerItem& l) {
+    if (!l.art || l.art->isEmpty()) return false;
+    if (l.art->opacity < 1.0) return false;
+    const auto& pt = l.art->paint;
+    if (pt.hasFill && pt.fill[3] != 255) return false;
+    if (pt.hasGradient) {
+        for (const auto& stop : pt.gradient.stops) {
+            if (stop.rgba[3] != 255) return false;
         }
     }
-    p.restore();
+    if (!pt.patternId.empty()) return false;
+    if (pt.hasStroke && pt.stroke[3] != 255) return false;
+    if (!pt.markerStart.empty() || !pt.markerMid.empty() ||
+        !pt.markerEnd.empty())
+        return false;
+    if (!pt.clipId.empty() || !pt.maskId.empty()) return false;
+    if (pt.hasMesh || pt.hasFilter) return false;
+    return true;
 }
+
+// Conservative doc-space box for culling a live vector draw: the layer's
+// baked footprint grown well past any stroke/marker overhang. Layers with
+// markers are never culled (marker glyphs can extend past the bake box, and
+// a wrongly skipped layer reads as missing content). Anything else either
+// draws (box visible) or would have been fully clipped by the painter.
+bool liveDrawCulled(const LayerItem& l, const QRectF& visibleDoc) {
+    if (visibleDoc.isEmpty()) return false;
+    const auto& pt = l.art->paint;
+    if (!pt.markerStart.empty() || !pt.markerMid.empty() ||
+        !pt.markerEnd.empty())
+        return false;
+    const LayerDrawSource src = layerDrawSource(l);
+    if (!src.img) return false;  // no bake box: cannot prove off-view
+    const QRectF box(QPointF(src.offset.x(), src.offset.y()),
+                     QSizeF(src.img->width() * src.scaleX,
+                            src.img->height() * src.scaleY));
+    if (box.isEmpty()) return false;
+    const double m =
+        16.0 + 0.05 * std::max(box.width(), box.height());
+    return !box.adjusted(-m, -m, m, m).intersects(visibleDoc);
+}
+
+// Content box for one solo run: the union of its pixel layers' baked
+// footprints. Runs holding anything that can paint outside layer footprints
+// (overlay stand-ins for Text/Shape/Adjustment rows, whole-region live
+// adjustments, tone spans with their low-pass halo, layer-style glows)
+// report fullDoc and keep the legacy full-width blit. Anything else is
+// transparent outside the union, so shrinking or skipping the blit paints
+// bit-identically with far less upscale filtering.
+struct RunBox {
+    QRectF box;
+    bool fullDoc = true;
+};
+RunBox runContentBox(const DocumentItem& d, int from, int to,
+                     const QVector<char>& effVis) {
+    RunBox out;
+    out.fullDoc = false;
+    bool any = false;
+    for (int k = from; k <= to; ++k) {
+        if (k < 0) continue;
+        if (k >= d.layers.size() || k >= effVis.size()) break;
+        const LayerItem& l = d.layers[k];
+        if (!l.visible || !effVis[k]) continue;
+        // Plain groups carry no pixels and draw no overlay: they never
+        // extend a run's painted area. Tone headers are the exception —
+        // their spans read a blurred backdrop with a halo — as are overlay
+        // stand-ins (Text/Shape rows paint doc-relative shapes), live
+        // adjustments (they grade the whole region) and styled layers
+        // (glows reach past the footprint). None of those is bounded by a
+        // layer box: keep the full overlap.
+        if (l.kind == LayerItem::Kind::Group) {
+            if (l.toneBlendGroup) {
+                out.fullDoc = true;
+                return out;
+            }
+            continue;
+        }
+        if (l.kind != LayerItem::Kind::Pixel || !l.style.empty()) {
+            out.fullDoc = true;
+            return out;
+        }
+        if (!l.pixels) {
+            // Gather would realise this (doc-sized, opaque for the
+            // Background): cannot bound it without painting.
+            out.fullDoc = true;
+            return out;
+        }
+        // stageBounds, not layerBounds: the box must also cover the
+        // resample halo (a scaled layer colours up to a texel past its
+        // footprint) and any unlinked mask overhang, or the blit would
+        // shave a real fringe.
+        const QRectF b = stageBounds(d, l);
+        if (b.isEmpty()) continue;
+        out.box = any ? out.box.united(b) : b;
+        any = true;
+    }
+    if (!any) out.box = QRectF();
+    return out;
+}
+
+
 
 }  // namespace
 
@@ -149,12 +199,23 @@ void paintVectorLayer(QPainter& p, const LayerItem& l) {
 // qualifies, and the caller falls back to the single flattened blit — photo
 // documents paint exactly one composite, as before.
 bool CanvasView::paintSegmented(QPainter& p, const QTransform& t,
-                                const QRectF& docRect, const QRect& viewDirty) {
+                                const QRectF& docRect, const QRect& viewDirty,
+                                bool baseDrawn) {
     DocumentItem* d = doc();
     if (!d) return false;
     const QVector<int> drawable = vectorViewOrder(*d);
     if (drawable.isEmpty()) return false;
     QSet<int> drawableSet(drawable.begin(), drawable.end());
+
+    // Document region visible through the damaged view rect: live draws
+    // outside it would be fully clipped by the painter, so they are skipped
+    // before building any QPainterPath (the expensive part at 32x zoom with
+    // hundreds of parts). Empty on full repaints: nothing is culled then.
+    QRectF visibleDoc;
+    if (!viewDirty.isEmpty()) {
+        visibleDoc =
+            t.inverted().mapRect(QRectF(viewDirty)).intersected(docRect);
+    }
 
     // One linear visibility sweep shared by the gate, the walk and the
     // draws below. Per-index effectivelyVisible() scans back O(n) rows per
@@ -163,103 +224,137 @@ bool CanvasView::paintSegmented(QPainter& p, const QTransform& t,
     QVector<int> effParent;
     d->effectiveVisibility(effVis, effParent);
 
-    // Fast path: the whole document blends Normal with no adjustments, clips,
-    // masks, tone groups or layer styles, every drawable sits above every
-    // pixel layer, and every drawable is fully opaque. Then source-over
-    // associativity makes per-run solo composites redundant: the edit-time
-    // full composite already equals them, and opaque direct draws over their
-    // own raster change nothing. Zero rebuilds, zero visibility churn —
-    // steady frames are one blit plus the direct draws (Brazil: ~5ms instead
-    // of ~450ms). Anything exotic falls through to the solo path below.
+    // Unified vector paint: one edit-time composite blit plus crisp live
+    // draws only where provably safe. The composite already holds every
+    // layer correctly ordered and blended (pixels, groups, adjustments,
+    // tone spans, styles, filters); a live draw over it is exact exactly
+    // when it paints over its own raster with nothing stacked above it
+    // that it would wrongly cover. That holds when the layer is fully
+    // opaque AND no pixel content above it overlaps the visible region:
+    // an opaque draw covers its raster texel-for-texel (same geometry),
+    // and with no above-pixels the composite beneath it is just the
+    // below-stack it belongs over. Everything else stays raster-only:
+    // translucent art keeps its correct composite blend (sampled at
+    // document resolution, like placed photos). Partially covered lives
+    // draw crisp clipped to their uncovered region; fully covered ones
+    // are skipped (their raster already shows correctly underneath).
+    // Zero rebuilds, zero visibility churn, zero uploads, zero cached
+    // images: zoom/pan frames cost one blit plus the visible crisp draws,
+    // independent of layer count. The old fast path is subsumed (its
+    // documents draw every live: nothing above, all opaque).
+    //
+    // Pixel-run ranges between the drawables (panel order): only their
+    // boxes matter here — no images, no rebuilds. A run stacked above a
+    // live with an overlapping box clips (or vetoes) that live's draw.
+    struct Run {
+        int from = -1;  // panel indices, from <= to
+        int to = -1;
+        QRectF box;
+        bool full = true;  // unbounded: overlaps everything below it
+    };
+    std::vector<Run> runs;
     {
-        bool soloNeeded = false;
-        int maxDraw = -1, minPix = d->layers.size();
-        for (int k = 0; k < d->layers.size() && !soloNeeded; ++k) {
-            const LayerItem& l = d->layers[k];
-            if (!effVis[k]) continue;
-            if (l.kind == LayerItem::Kind::Group) {
-                if (l.toneBlendGroup) soloNeeded = true;
+        int w = d->layers.size() - 1;
+        while (w >= 0) {
+            if (drawableSet.contains(w) && effVis[w]) {
+                --w;
                 continue;
             }
-            if (l.blendMode != QLatin1String("Normal") ||
-                l.kind == LayerItem::Kind::Adjustment || l.clipped || l.hasMask ||
-                l.toneBlendGroup || !l.style.empty()) {
-                soloNeeded = true;
-                break;
-            }
-            if (drawableSet.contains(k)) {
-                maxDraw = std::max(maxDraw, k);
-                if (l.art && !l.art->isEmpty()) {
-                    const auto& pt = l.art->paint;
-                    if (l.art->opacity < 1.0) soloNeeded = true;
-                    if (pt.hasFill && pt.fill[3] != 255) soloNeeded = true;
-                    if (pt.hasGradient) {
-                        for (const auto& s : pt.gradient.stops) {
-                            if (s.rgba[3] != 255) soloNeeded = true;
-                        }
-                    }
-                    if (!pt.patternId.empty()) soloNeeded = true;
-                    if (pt.hasStroke && pt.stroke[3] != 255) soloNeeded = true;
-                    if (!pt.markerStart.empty() || !pt.markerMid.empty() ||
-                        !pt.markerEnd.empty())
-                        soloNeeded = true;
-                    if (!pt.clipId.empty() || !pt.maskId.empty()) soloNeeded = true;
-                    if (pt.hasMesh || pt.hasFilter) soloNeeded = true;
+            int runTop = w;
+            while (w >= 0 && (!drawableSet.contains(w) || !effVis[w]))
+                --w;
+            bool anyVisible = false;
+            for (int k = runTop; k > w; --k) {
+                if (d->layers[k].visible && effVis[k]) {
+                    anyVisible = true;
+                    break;
                 }
-            } else if (l.pixels) {
-                minPix = std::min(minPix, k);
             }
-        }
-        if (!soloNeeded && maxDraw >= 0 && maxDraw < minPix) {
-            blitComposite(p, t, d, docRect, viewDirty);
-            for (int k = d->layers.size() - 1; k >= 0; --k) {
-                if (drawableSet.contains(k) && effVis[k])
-                    paintVectorLayer(p, d->layers[k]);
-            }
-            return true;
+            if (!anyVisible) continue;
+            const RunBox rb = runContentBox(*d, w + 1, runTop, effVis);
+            runs.push_back(Run{w + 1, runTop, rb.box, rb.fullDoc});
         }
     }
-
-    SegmentGuard guard(d);
-    // Paint order is bottom-to-top: panel index size-1 down to 0.
-    int i = d->layers.size() - 1;
-    auto paintRun = [&](int from, int to) {
-        guard.painted = true;
-        // Composite layers [from, to] (panel indices, from <= to) solo, then
-        // restore visibility AT ONCE: later walk steps evaluate visibility
-        // flags, and must see user state, not a previous run's mask.
-        for (int k = 0; k < d->layers.size(); ++k)
-            d->layers[k].visible =
-                guard.visible[k] && k >= from && k <= to;
-        d->rebuildComposite();
-        blitComposite(p, t, d, docRect, viewDirty);
-        for (int k = 0; k < d->layers.size() && k < guard.visible.size(); ++k)
-            d->layers[k].visible = static_cast<bool>(guard.visible[k]);
-    };
-    while (i >= 0) {
-        if (drawableSet.contains(i) && effVis[i]) {
-            paintVectorLayer(p, d->layers[i]);
-            --i;
-            continue;
+    // Visible region for the overlap tests (whole doc on full repaints).
+    const QRectF vis = visibleDoc.isEmpty() ? docRect : visibleDoc;
+    // Effective view density (transform scale times device pixels): the
+    // view-cache bucket key, so repeat frames blit instead of rebuilding.
+    const double zoomEff = std::hypot(t.m11(), t.m12()) *
+                           (p.device() ? p.device()->devicePixelRatioF() : 1.0);
+    // The tiled path already laid the base down before its ready tiles; a
+    // second composite blit here would cover them and lose the sharpening.
+    if (!baseDrawn) blitComposite(p, t, d->composite, docRect, viewDirty);
+    // Coverage index over the runs: the per-layer overlap scan below turns
+    // quadratic past a few thousand layers, so queries only visit runs
+    // sharing a cell with the live box. Same candidate set, same clipping.
+    std::vector<CoverRun> coverRuns;
+    coverRuns.reserve(runs.size());
+    for (const Run& r : runs) coverRuns.push_back(CoverRun{r.box, r.full});
+    CoverIndex cover;
+    cover.build(coverRuns, docRect);
+    std::vector<int> candidates;
+    CrispStats crispStats;
+    const auto crispT0 = std::chrono::steady_clock::now();
+    // Live-bake budget: the frame rasterizes crisp layers only while time
+    // remains; the rest keep composite pixels this frame and sharpen via
+    // background tiles. Without it a 35k-layer frame bakes for seconds and
+    // the cache (which can never hold that working set) just thrashes.
+    const auto crispDeadline =
+        crispT0 + std::chrono::milliseconds(kMaxCrispBakeMs);
+    // Bottom-to-top: panel index size-1 down to 0 (matches legacy order).
+    for (int k = d->layers.size() - 1; k >= 0; --k) {
+        if (!drawableSet.contains(k) || !effVis[k]) continue;
+        const LayerItem& l = d->layers[k];
+        if (liveDrawCulled(l, visibleDoc)) continue;
+        if (!liveDrawOpaque(l)) continue;  // raster fallback, still correct
+        // Above-pixel overlap: runs stacked above (smaller panel index)
+        // whose boxes reach the live's visible box. Fully covered lives are
+        // skipped outright (their raster already shows correctly in the
+        // composite); partial overlaps draw crisp only where uncovered.
+        // Clipping can only ever remove crispness, never correctness: the
+        // complete composite beneath is always right.
+        const QRectF liveBox = layerBounds(*d, l).intersected(docRect);
+        if (liveBox.isEmpty()) continue;  // degenerate bake: draws nothing
+        QPainterPath crisp;
+        crisp.addRect(liveBox);
+        bool anyAbove = false;
+        cover.query(liveBox.intersected(vis), candidates);
+        for (int ri : candidates) {
+            const Run& r = runs[(size_t)ri];
+            if (r.to >= k) continue;  // at or below the live, not above
+            const QRectF box = r.full ? docRect : r.box;
+            const QRectF over = box.intersected(liveBox).intersected(vis);
+            if (over.isEmpty()) continue;
+            anyAbove = true;
+            QPainterPath cut;
+            cut.addRect(over);
+            crisp = crisp.subtracted(cut);
+            if (crisp.isEmpty()) break;
         }
-        // Pixel run: extend while layers are neither drawable nor drawable...
-        int runTop = i;
-        while (i >= 0 &&
-               (!drawableSet.contains(i) || !effVis[i]))
-            --i;
-        // ...but skip fully-hidden stretches without a (wasted) rebuild.
-        bool anyVisible = false;
-        for (int k = runTop; k > i; --k) {
-            if (guard.visible[k] && effVis[k]) {
-                anyVisible = true;
-                break;
-            }
-        }
-        if (anyVisible) paintRun(i + 1, runTop);
+        if (anyAbove && crisp.isEmpty()) continue;
+        p.save();
+        if (anyAbove) p.setClipPath(crisp);
+        // Cached crisp draw: blit after the first bake (the clip above
+        // still applies to the blit).
+        LayerViewCache::instance().paintCachedCrisp(p, *d, k, liveBox,
+                                                    zoomEff, &crispStats,
+                                                    crispDeadline);
+        p.restore();
+    }
+    if (crispStats.drawn > 0 || crispStats.skipped > 0) {
+        const double crispMs =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - crispT0)
+                .count();
+        ::pittore::core::log::log_info(
+            "[render][segmented] crisp=%ld cached=%ld baked=%ld direct=%ld "
+            "skipped=%ld cache=%.1fMB ms=%.2f",
+            crispStats.drawn, crispStats.hits, crispStats.baked,
+            crispStats.direct, crispStats.skipped,
+            LayerViewCache::instance().usageBytes() / 1048576.0, crispMs);
     }
     return true;
 }
-
 
 // ---------------------------------------------------------------------------
 // Painting
@@ -299,10 +394,17 @@ void CanvasView::paintEvent(QPaintEvent* e) {
     // proof profile lines up with the [render][proof] build lines.
     ::pittore::core::log::log_info(
         "[render][paint] dirty=%dx%d at (%d,%d) viewport=%dx%d zoom=%.2f "
-        "proof=%d ms=%.2f",
+        "proof=%d mode=%d ms=%.2f",
         e->rect().width(), e->rect().height(), e->rect().x(), e->rect().y(),
         viewport()->width(), viewport()->height(), zoom(),
-        (state_->proofEnabled() || state_->proofGamut()) ? 1 : 0, ms);
+        (state_->proofEnabled() || state_->proofGamut()) ? 1 : 0,
+        doc() ? static_cast<int>(
+                    DisplayModeGovernor::instance().modeFor(doc()))
+              : 0,
+        ms);
+    // Feed the display-mode governor: sustained slow frames on heavy
+    // documents degrade Full to Draft automatically (and recover).
+    DisplayModeGovernor::instance().noteFrame(doc(), ms);
 
     // True click→paint latency: a region edit (eye toggle, move/scale frame,
     // stroke flush) stamps its doc rect + monotonic time; the first canvas
@@ -523,7 +625,46 @@ void CanvasView::paintDocument(QPainter& p, const QRect& viewDirty) {
                        ? QRect()
                        : docDirtyF.toAlignedRect().intersected(d->composite.rect());
     }
-    if (!d->composite.isNull() && !(!proof && paintSegmented(p, t, docRect, viewDirty))) {
+    // Display-mode content: exact replacements for the classic
+    // composite+segmented path below. Any false return falls through to it,
+    // so these paths can only ever skip work, never change pixels.
+    bool contentDone = false;
+    // Set when a content path already put the composite base on screen. Only
+    // the tiled path can do that and still return false: it lays the base
+    // down, draws every tile that had finished, and reports that some were
+    // missing. The segmented walk below then owns only the live draws - if
+    // it blitted the base again it would cover those ready tiles and the
+    // frame would drop back to the resampled composite.
+    bool baseDrawn = false;
+    if (!proof) {
+        const double zoomEff =
+            std::hypot(t.m11(), t.m12()) *
+            (p.device() ? p.device()->devicePixelRatioF() : 1.0);
+        switch (DisplayModeGovernor::instance().modeFor(d)) {
+            case CanvasDisplayMode::Draft:
+                contentDone = paintDraftContent(p, *d, t, zoomEff, docRect,
+                                                viewDirty, [this] {
+                                                    viewport()->update();
+                                                });
+                break;
+            case CanvasDisplayMode::Outline:
+                contentDone = paintOutlineContent(p, *d, t, zoomEff, docRect,
+                                                 viewDirty);
+                break;
+            case CanvasDisplayMode::Full:
+                contentDone = paintTiledContent(
+                    p, *d, t, zoomEff, docRect, viewDirty,
+                    [this] { viewport()->update(); });
+                baseDrawn = !contentDone && !d->composite.isNull();
+                break;
+        }
+    }
+    const bool segmentedEligible = !contentDone && !d->composite.isNull();
+    // The live walk draws over whatever base is on screen; it never lays the
+    // base down itself when the tiled path already did (see paintSegmented).
+    const bool drewLive = segmentedEligible && !proof &&
+                          paintSegmented(p, t, docRect, viewDirty, baseDrawn);
+    if (segmentedEligible && !drewLive && !baseDrawn) {
         if (proof) {
             // Full repaint proofs (and draws) the whole document; a damaged
             // rect proofs just that stretch. Both sample through the cache,

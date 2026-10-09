@@ -739,8 +739,8 @@ void ComputeBackend::tone_blend(Buffer& dst, const Buffer& backdrop,
 
 void ComputeBackend::tone_blend_region(Buffer& dst, const Buffer& backdrop,
                                        std::uint32_t w, std::uint32_t h,
-                                       std::uint32_t rx0, std::uint32_t ry0,
-                                       std::uint32_t rx1, std::uint32_t ry1,
+                                       std::uint32_t, std::uint32_t,
+                                       std::uint32_t, std::uint32_t,
                                        const ToneBlendParams& p) {
     // Default: fall back to full-frame (correct but slower)
     tone_blend(dst, backdrop, w, h, p);
@@ -762,8 +762,6 @@ void hostBoxBlur(const RGBAf* src, RGBAf* dst, std::uint32_t w,
     // sums keep rounding at the naive level; alpha passes through.
     const int rr = std::max(1, radius);
     if (w == 0 || h == 0) return;
-    const int iw = static_cast<int>(w);
-    const int ih = static_cast<int>(h);
     const double n = static_cast<double>(2 * rr + 1);
     const std::size_t np = static_cast<std::size_t>(w) * h;
     RGBAf* tmp = tls_frame(np).data();

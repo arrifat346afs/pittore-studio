@@ -48,7 +48,7 @@ std::vector<std::uint8_t> writePdf(const std::vector<PdfPage>& pages,
     struct Staged {
         std::string body;
         bool stream = false;
-        std::string streamData;
+        std::string streamData = "";
     };
     std::vector<Staged> objs;
     objs.push_back({"<< /Type /Catalog /Pages 2 0 R >>"});  // 1

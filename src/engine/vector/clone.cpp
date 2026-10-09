@@ -12,15 +12,6 @@ std::string suffixId(const std::string& id, const std::string& suffix) {
     return id.empty() ? id : id + suffix;
 }
 
-void appendTransform(SvgElement& el, const std::string& extra) {
-    if (extra.empty()) return;
-    auto cur = el.get("transform");
-    if (!cur || cur->empty())
-        el.set("transform", extra);
-    else
-        el.set("transform", extra + " " + *cur);
-}
-
 std::shared_ptr<SvgElement> copyTree(const SvgElement& el,
                                      const std::string& suffix) {
     auto out = std::make_shared<SvgElement>();

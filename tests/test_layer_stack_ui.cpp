@@ -785,6 +785,74 @@ static void test_group_collapse_and_group_visibility() {
     CHECK(d->effectivelyVisible(g2 + 1));
 }
 
+static void test_group_across_nesting_owns_all_children() {
+    // Grouping rows gathered from different nesting levels must still leave a
+    // well-formed stack: the token walk and the ancestor scans have to agree,
+    // or the new group eye misses the stranded rows on canvas.
+    AppState state;
+    DocumentItem* d = state.addDocument(QStringLiteral("grpindent"), QSize(64, 64),
+                                        300);
+    CHECK(d != nullptr);
+    if (!d) return;
+    if (d->composite.isNull()) d->rebuildComposite();
+    const int bgR = d->composite.pixelColor(5, 5).red();
+
+    // Centers place 8px squares at A=[12..20), B=[44..52)x[44..52),
+    // C=[44..52)x[12..20).
+    state.placeImageLayer(solidImage(8, 8, 0xFFFF0000), QStringLiteral("A"),
+                          QPointF(16, 16), 1.0);
+    state.placeImageLayer(solidImage(8, 8, 0xFF0000FF), QStringLiteral("B"),
+                          QPointF(48, 48), 1.0);
+    state.placeImageLayer(solidImage(8, 8, 0xFF00FF00), QStringLiteral("C"),
+                          QPointF(48, 16), 1.0);
+    // Stack: C(0) B(1) A(2) Bg(3). Nest B under a first group.
+    d->selectedLayers = QVector<int>{1, 2};
+    const int g = state.groupSelectedLayers();
+    CHECK(g == 1);
+    CHECK_EQ(d->layers[g + 1].indent, 1);   // B nested
+    CHECK_EQ(d->layers[g + 2].indent, 1);   // A nested
+
+    // Group the nested B (indent 1, without its header) with the top-level C
+    // (indent 0): the re-indent must not strand B behind the pixel row.
+    d->selectedLayers = QVector<int>{0, g + 1};
+    const int g2 = state.groupSelectedLayers();
+    CHECK(g2 >= 0);
+    CHECK(d->layers[g2].kind == LayerItem::Kind::Group);
+
+    // Well-formed: no step deeper than one past its predecessor, and every
+    // row deeper than its nearest shallower predecessor hangs under a group.
+    for (int i = 0; i < d->layers.size(); ++i) {
+        CHECK(d->layers[i].indent >= 0);
+        if (i > 0) CHECK(d->layers[i].indent <= d->layers[i - 1].indent + 1);
+        if (d->layers[i].indent > 0) {
+            int parent = -1;
+            for (int j = i - 1; j >= 0; --j) {
+                if (d->layers[j].indent < d->layers[i].indent) {
+                    parent = j;
+                    break;
+                }
+            }
+            CHECK(parent >= 0);
+            if (parent >= 0)
+                CHECK(d->layers[parent].kind == LayerItem::Kind::Group);
+        }
+    }
+    // Token and scan-back agree: every row the token claims lists the header.
+    const int end = layerTokenEnd(d->layers, g2);
+    CHECK(end > g2);
+    for (int i = g2 + 1; i <= end; ++i)
+        CHECK(d->enclosingGroups(i).contains(g2));
+
+    // The group eye hides the whole subtree through the panel path.
+    CHECK(state.setLayersVisible(QVector<int>{g2}, false));
+    CHECK(!d->effectivelyVisible(g2 + 1));
+    CHECK_EQ(d->composite.pixelColor(46, 14).red(), bgR);   // C hidden
+    CHECK_EQ(d->composite.pixelColor(46, 46).blue(), bgR);  // B hidden
+    CHECK(state.setLayersVisible(QVector<int>{g2}, true));
+    CHECK_EQ(d->composite.pixelColor(46, 14).green(), 255);  // C restored
+    CHECK_EQ(d->composite.pixelColor(46, 46).blue(), 255);   // B restored
+}
+
 static void test_group_thumbnail() {
     AppState state;
     DocumentItem* d = state.addDocument(QStringLiteral("grpthumb"), QSize(64, 64),
@@ -996,6 +1064,7 @@ int main(int argc, char** argv) {
     test_select_from_layer_alpha();
     test_select_from_group_alpha();
     test_group_collapse_and_group_visibility();
+    test_group_across_nesting_owns_all_children();
     test_group_thumbnail();
     test_effective_visibility_matches_scanback();
     test_placed_svg_rebases_into_group();

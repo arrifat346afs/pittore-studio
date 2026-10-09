@@ -8,6 +8,7 @@
 #include "ui/app_state.h"
 #include "ui/logging.h"
 #include "ui/main_window.h"
+#include "ui/mcp/mcp_bridge.h"
 #include "ui/theme.h"
 
 namespace {
@@ -57,6 +58,11 @@ int main(int argc, char** argv) {
     pittore::ui::MainWindow window(&state);
     window.resize(1680, 1000);
     window.show();
+
+    // Live-session AI bridge: local socket for the pittore-mcp shim.
+    // Bridgeless (second instance) is fine — the app runs on regardless.
+    pittore::ui::McpBridge mcpBridge(&state);
+    mcpBridge.start();
 
     return QApplication::exec();
 }

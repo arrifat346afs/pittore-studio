@@ -138,6 +138,36 @@ just models          # download everything
 just model birefnet-portrait
 ```
 
+## AI bridge (MCP, partial)
+
+AI assistants can drive the live session through Model Context Protocol.
+The app listens on a per-user local socket; the `pittore-mcp` shim (stdio,
+installed alongside the app) translates MCP into bridge commands. The app
+must be open — without a live session every tool call fails honestly.
+
+```json
+{
+  "mcpServers": {
+    "pittore-studio": { "command": "pittore-mcp" }
+  }
+}
+```
+
+Tools: `ping`, `list_documents`, `document_info` (active document metadata
+and layer stack), `composite_png` (rendered canvas as an image, long side
+capped), `list_filters` (every engine filter with its parameters),
+`new_document`, `add_shape` (rectangle/ellipse/triangle), `add_text`,
+`apply_filter`, `set_layer_visible`, `set_layer_blend`, `set_layer_opacity`,
+`set_active_layer`, `undo`, `redo`, `save_project`, `open_image`,
+`export_png`. Tool system: `list_tools` (every editor tool),
+`list_tool_options` (all options with ranges, defaults and live values),
+`set_tool_option`, `list_brushes` (factory plus custom presets),
+`select_brush`, and `paint_stroke` (round-brush dabs along a polyline, one
+undo step; full brush dynamics stay pointer-side). Reads are free; mutations reuse the panels' undo-safe entry
+points, run on the GUI thread, and must stay fast (a call blocks the UI
+while it runs). Only this user can reach the socket; there is no network
+listener.
+
 ## Performance
 
 - Tile-based compositing so only the changed region is recomposited.

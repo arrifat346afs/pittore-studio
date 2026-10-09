@@ -76,7 +76,7 @@ int CanvasView::brushRotationMode(ToolId tool) const {
 }
 
 
-double CanvasView::pressureFlowMult(ToolId tool, double p,
+double CanvasView::pressureFlowMult(ToolId, double p,
                                      const sensordrive::SensorState& st) const {
     double m;
     const auto& curve = state_->strokeFlowCurve();

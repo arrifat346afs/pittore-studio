@@ -28,6 +28,12 @@ jobs:
             libtomlplusplus-dev liblcms2-dev \
             qt6-base-dev libqt6svg6-dev \
             libwebp-dev libtiff-dev libjpeg-dev libzstd-dev libqrencode-dev
+          # UI tests enumerate installed font families (type-tool-ui needs
+          # >100); a bare runner ships only a handful, so install Noto's
+          # per-script families plus the usual core sets.
+          sudo apt-get install -y fonts-dejavu-core fonts-liberation2 \
+            fonts-noto-core fonts-noto-mono fonts-noto-extra
+          fc-cache -f
       - name: Configure
         run: meson setup build ${{ env.MESON_OPTS }}
       - name: Build

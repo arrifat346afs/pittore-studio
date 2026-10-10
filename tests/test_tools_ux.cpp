@@ -603,6 +603,12 @@ int main(int argc, char** argv) {
             dock("properties")) == false);  // properties lives on top
         CHECK(firstTab(QStringLiteral("Layers")) ==
               QStringLiteral("Layers"));
+        // Geometry is only live for a tab group's current tab — an
+        // obscured tab keeps whatever rect it last had — so surface both
+        // docks before comparing their groups' positions.
+        if (layers) layers->raise();
+        if (adjustments) adjustments->raise();
+        app.processEvents();
         CHECK(layers->geometry().center().y() <
               adjustments->geometry().center().y());
         // Vector mode: pixel-only panels hide, Stroke/Appearance join the
@@ -623,6 +629,10 @@ int main(int argc, char** argv) {
         CHECK(win.tabifiedDockWidgets(dock("color")).contains(appearance));
         CHECK(firstTab(QStringLiteral("Layers")) ==
               QStringLiteral("Layers"));
+        // Same live-geometry rule as above: surface both docks first.
+        if (layers) layers->raise();
+        if (stroke) stroke->raise();
+        app.processEvents();
         CHECK(layers->geometry().center().y() <
               stroke->geometry().center().y());
         // Back to Pixel restores the hidden panels into their groups.

@@ -327,10 +327,36 @@ jobs:
           name: flatpak
           path: dist/*.flatpak
 
+  snap:
+    name: Snap
+    runs-on: ubuntu-24.04
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build snap
+        uses: snapcore/action-build@v1
+        with:
+          snapcraft-channel: stable
+      - name: Stage snap
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(grep -oP "^[[:space:]]*version\s*:\s*'\K[^']+" meson.build)"
+          fi
+          mkdir -p dist
+          cp ./*.snap "dist/pittore-studio-${VERSION}-amd64.snap"
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snap
+          path: dist/*.snap
+
   release:
     name: publish GitHub Release
     runs-on: ubuntu-24.04
-    needs: [deb, rpm, arch, tarball, appimage, flatpak]
+    needs: [deb, rpm, arch, tarball, appimage, flatpak, snap]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
@@ -348,7 +374,7 @@ jobs:
   release-latest:
     name: publish rolling release
     runs-on: ubuntu-24.04
-    needs: [deb, rpm, arch, tarball, appimage, flatpak]
+    needs: [deb, rpm, arch, tarball, appimage, flatpak, snap]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     permissions:
       contents: write

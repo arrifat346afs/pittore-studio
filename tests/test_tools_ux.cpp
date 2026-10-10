@@ -40,6 +40,7 @@
 #include "ui/options_bar.h"
 #include "ui/panels/registry/panel_creators.h"
 #include "ui/canvas_view.h"
+#include "ui/contextual_task_bar.h"
 #include "ui/main_window.h"
 #include "ui/panels.h"
 #include "ui/persona/persona.h"
@@ -5058,12 +5059,21 @@ int main(int argc, char** argv) {
         CHECK(canvas->pixelGridVisible());
         canvas->setZoom(8.0);
         app.processEvents();
+        // The floating contextual task bar would pollute the grab with
+        // bright text pixels (font-dependent), so hide it while counting
+        // grid paint, then restore it. Grid inks are dim whites over
+        // black, so count any painted (nonzero) pixel rather than only
+        // near-white ones.
+        QWidget* taskBar = canvas->taskBar();
+        const bool taskBarWasVisible = taskBar && taskBar->isVisible();
+        if (taskBar) taskBar->hide();
+        app.processEvents();
         const QImage shot = canvas->viewport()->grab().toImage();
         int bright = 0;
         for (int y = 0; y < shot.height(); ++y)
             for (int x = 0; x < shot.width(); ++x) {
                 const QColor c = shot.pixelColor(x, y);
-                if (c.red() > 200 && c.green() > 200 && c.blue() > 200)
+                if (c.red() > 0 || c.green() > 0 || c.blue() > 0)
                     ++bright;
             }
         CHECK(bright > 100);
@@ -5075,10 +5085,14 @@ int main(int argc, char** argv) {
         for (int y = 0; y < shot2.height(); ++y)
             for (int x = 0; x < shot2.width(); ++x) {
                 const QColor c = shot2.pixelColor(x, y);
-                if (c.red() > 200 && c.green() > 200 && c.blue() > 200)
+                if (c.red() > 0 || c.green() > 0 || c.blue() > 0)
                     ++bright2;
             }
         CHECK(bright2 > 100);
+        // The pixel grid strictly adds lines over the regular grid, so
+        // the first grab must hold strictly more paint than the second.
+        CHECK(bright > bright2);
+        if (taskBar && taskBarWasVisible) taskBar->show();
         // Leave the sandbox as found.
         s = state.settings();
         s.gridSpacing = 64.0;

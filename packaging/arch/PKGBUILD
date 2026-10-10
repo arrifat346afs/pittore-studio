@@ -6,6 +6,10 @@ pkgdesc='Layer-based photo editor for Linux'
 arch=('x86_64')
 url='https://github.com/arrifat346afs/pittore-studio'
 license=('MIT')
+# No LTO: makepkg's default -flto makes BFD ld fail the final link with
+# "copy relocation against non-copyable protected symbol" on Qt6's
+# staticMetaObject symbols.
+options=('!lto')
 depends=('qt6-base' 'qt6-svg' 'zlib' 'harfbuzz' 'freetype2' 'fontconfig' 'lcms2'
          'libwebp' 'libtiff' 'libjpeg-turbo' 'zstd' 'qrencode')
 makedepends=('meson' 'ninja' 'git' 'pkgconf' 'tomlplusplus')

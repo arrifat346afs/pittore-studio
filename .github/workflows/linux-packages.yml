@@ -274,7 +274,7 @@ jobs:
           ninja -C build -j"$j" src/app/painter src/app/pittore-mcp
           rm -rf AppDir dist
           mkdir -p AppDir dist
-          DESTDIR="$PWD/AppDir" meson install -C build --no-rebuild --prefix=/usr
+          DESTDIR="$PWD/AppDir" meson install -C build --no-rebuild
           cp packaging/linux/studio.pittore.painter.desktop AppDir/studio.pittore.painter.desktop
           cp packaging/linux/icons/hicolor/scalable/apps/painter.svg AppDir/painter.svg
           mkdir -p AppDir/usr/share/applications AppDir/usr/share/metainfo

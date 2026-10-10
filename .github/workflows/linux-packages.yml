@@ -142,9 +142,13 @@ jobs:
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           mkdir -p dist rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
           sed -e "s/^Version:.*/Version:        $VERSION/" packaging/rpm/pittore-studio.spec > rpmbuild/SPECS/pittore-studio.spec
-          # rpmbuild %prep expects a source tarball; archive the checked-out
-          # revision so tag and non-tag runs build the same commit.
-          git archive --format=tar.gz --prefix="pittore-studio-$VERSION/" HEAD > "rpmbuild/SOURCES/pittore-studio-$VERSION.tar.gz"
+          # rpmbuild %prep expects a source tarball; pack the checked-out
+          # tree (no git dependency: there may be no repo inside the
+          # container) so tag and non-tag runs build the same commit.
+          tar -czf "rpmbuild/SOURCES/pittore-studio-$VERSION.tar.gz" \
+            --transform "s,^,pittore-studio-$VERSION/," \
+            --exclude=./build --exclude=./rpmbuild --exclude=./dist \
+            --exclude=./.git .
           rpmbuild -bb --define "_topdir $PWD/rpmbuild" --define "_version $VERSION" rpmbuild/SPECS/pittore-studio.spec
           cp rpmbuild/RPMS/x86_64/*.rpm dist/
           ls -l dist
@@ -181,8 +185,12 @@ jobs:
           mkdir -p pkgwork dist
           cp packaging/arch/PKGBUILD pkgwork/
           # The PKGBUILD points at the release tarball; pre-place an archive
-          # of this revision so makepkg builds this commit without network.
-          git archive --format=tar.gz --prefix="pittore-studio-$VERSION/" HEAD > "pkgwork/pittore-studio-$VERSION.tar.gz"
+          # of this revision (no git dependency: there may be no repo
+          # inside the container) so makepkg builds this commit offline.
+          tar -czf "pkgwork/pittore-studio-$VERSION.tar.gz" \
+            --transform "s,^,pittore-studio-$VERSION/," \
+            --exclude=./build --exclude=./pkgwork --exclude=./dist \
+            --exclude=./.git .
           sed -i -e "s/^pkgver=.*/pkgver=$VERSION/" pkgwork/PKGBUILD
           chown -R builder:builder "$PWD"
           cd pkgwork
@@ -234,8 +242,8 @@ jobs:
           path: dist/*.tar.gz
 
   appimage:
-    name: AppImage (Ubuntu 22.04)
-    runs-on: ubuntu-22.04
+    name: AppImage (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
     needs: test
     steps:
       - uses: actions/checkout@v4
@@ -244,15 +252,11 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y build-essential meson ninja-build git pkg-config \
-            file wget cmake \
+            file wget \
             zlib1g-dev libharfbuzz-dev libfreetype-dev libfontconfig-dev \
-            liblcms2-dev \
+            libtomlplusplus-dev liblcms2-dev \
             qt6-base-dev libqt6svg6-dev qt6-base-dev-tools \
             libwebp-dev libtiff-dev libjpeg-dev libzstd-dev libqrencode-dev
-          git clone https://github.com/marzer/tomlplusplus.git tomlplusplus
-          git -C tomlplusplus checkout 30172438cee64926dc41fdd9c11fb3ba5b2ba9de
-          cmake -S tomlplusplus -B tomlplusplus/build -DCMAKE_INSTALL_PREFIX=/usr
-          sudo cmake --install tomlplusplus/build
       - name: Build and pack AppImage
         run: |
           set -euo pipefail
@@ -323,36 +327,10 @@ jobs:
           name: flatpak
           path: dist/*.flatpak
 
-  snap:
-    name: Snap
-    runs-on: ubuntu-24.04
-    needs: test
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build snap
-        uses: snapcore/action-build@v1
-        with:
-          snapcraft-channel: stable
-      - name: Stage snap
-        run: |
-          set -euo pipefail
-          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          else
-            VERSION="$(grep -oP "^[[:space:]]*version\s*:\s*'\K[^']+" meson.build)"
-          fi
-          mkdir -p dist
-          cp ./*.snap "dist/pittore-studio-${VERSION}-amd64.snap"
-          ls -l dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: snap
-          path: dist/*.snap
-
   release:
     name: publish GitHub Release
     runs-on: ubuntu-24.04
-    needs: [deb, rpm, arch, tarball, appimage, flatpak, snap]
+    needs: [deb, rpm, arch, tarball, appimage, flatpak]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
@@ -370,7 +348,7 @@ jobs:
   release-latest:
     name: publish rolling release
     runs-on: ubuntu-24.04
-    needs: [deb, rpm, arch, tarball, appimage, flatpak, snap]
+    needs: [deb, rpm, arch, tarball, appimage, flatpak]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     permissions:
       contents: write

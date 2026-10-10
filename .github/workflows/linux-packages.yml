@@ -79,7 +79,7 @@ jobs:
           if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="$(grep -oP "version\s*:\s*'\K[^']+" meson.build)"
+            VERSION="$(grep -oP "^[[:space:]]*version\s*:\s*'\K[^']+" meson.build)"
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           meson setup build ${{ env.MESON_OPTS }}
@@ -137,7 +137,7 @@ jobs:
           if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="$(grep -oP "version\s*:\s*'\K[^']+" meson.build)"
+            VERSION="$(grep -oP "^[[:space:]]*version\s*:\s*'\K[^']+" meson.build)"
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           mkdir -p dist rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
@@ -168,14 +168,14 @@ jobs:
           if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="$(grep -oP "version\s*:\s*'\K[^']+" meson.build)"
+            VERSION="$(grep -oP "^[[:space:]]*version\s*:\s*'\K[^']+" meson.build)"
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           pacman -Syu --noconfirm
           pacman -S --noconfirm --needed base-devel meson ninja git pkgconf sudo \
             zlib harfbuzz freetype2 fontconfig tomlplusplus lcms2 \
             qt6-base qt6-svg \
-            libwebp tiff libjpeg-turbo zstd libqrencode
+            libwebp libtiff libjpeg-turbo zstd qrencode
           # makepkg refuses to run as root; build as an unprivileged user.
           useradd -m builder
           mkdir -p pkgwork dist
@@ -215,7 +215,7 @@ jobs:
           if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="$(grep -oP "version\s*:\s*'\K[^']+" meson.build)"
+            VERSION="$(grep -oP "^[[:space:]]*version\s*:\s*'\K[^']+" meson.build)"
           fi
           meson setup build ${{ env.MESON_OPTS }}
           n=$(nproc)
@@ -244,18 +244,22 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y build-essential meson ninja-build git pkg-config \
-            file wget \
+            file wget cmake \
             zlib1g-dev libharfbuzz-dev libfreetype-dev libfontconfig-dev \
-            libtomlplusplus-dev liblcms2-dev \
+            liblcms2-dev \
             qt6-base-dev libqt6svg6-dev qt6-base-dev-tools \
             libwebp-dev libtiff-dev libjpeg-dev libzstd-dev libqrencode-dev
+          git clone https://github.com/marzer/tomlplusplus.git tomlplusplus
+          git -C tomlplusplus checkout 30172438cee64926dc41fdd9c11fb3ba5b2ba9de
+          cmake -S tomlplusplus -B tomlplusplus/build -DCMAKE_INSTALL_PREFIX=/usr
+          sudo cmake --install tomlplusplus/build
       - name: Build and pack AppImage
         run: |
           set -euo pipefail
           if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="$(grep -oP "version\s*:\s*'\K[^']+" meson.build)"
+            VERSION="$(grep -oP "^[[:space:]]*version\s*:\s*'\K[^']+" meson.build)"
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           meson setup build ${{ env.MESON_OPTS }}
@@ -307,7 +311,7 @@ jobs:
           if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="$(grep -oP "version\s*:\s*'\K[^']+" meson.build)"
+            VERSION="$(grep -oP "^[[:space:]]*version\s*:\s*'\K[^']+" meson.build)"
           fi
           rm -rf flatpak-build repo dist
           mkdir -p dist
@@ -335,7 +339,7 @@ jobs:
           if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="$(grep -oP "version\s*:\s*'\K[^']+" meson.build)"
+            VERSION="$(grep -oP "^[[:space:]]*version\s*:\s*'\K[^']+" meson.build)"
           fi
           mkdir -p dist
           cp ./*.snap "dist/pittore-studio-${VERSION}-amd64.snap"

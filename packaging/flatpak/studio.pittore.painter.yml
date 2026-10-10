@@ -12,6 +12,12 @@ finish-args:
   - --device=dri
   - --filesystem=host
 modules:
+  - name: tomlplusplus
+    buildsystem: cmake-ninja
+    sources:
+      - type: git
+        url: https://github.com/marzer/tomlplusplus.git
+        commit: 30172438cee64926dc41fdd9c11fb3ba5b2ba9de
   - name: pittore-studio
     buildsystem: meson
     builddir: true
